@@ -232,4 +232,4 @@ Los tests de integración usan `ubuntu:22.04` como imagen base. Asegúrate de te
 
 ## Licencia
 
-[Apache 2.0](LICENSE)
+[GNU General Public License v3.0](LICENSE)
