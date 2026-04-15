@@ -77,11 +77,18 @@ class TestRollbackOnFailure:
 
 
 class TestCreateVolumes:
+    @patch("flexipwn.layer1.docker_rootless.time.sleep")
     @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
-    def test_create_does_not_mount_system_dirs(self, _mock_detect, tmp_path):
+    def test_create_does_not_mount_system_dirs(self, _mock_detect, _mock_sleep, tmp_path):
         """create() no debe montar /etc, /root ni /home como bind mounts."""
         mock_client = MagicMock()
         config = FlexiPwnConfig(volumes_base_path=str(tmp_path / "vols"))
+
+        # Contenedor sin healthcheck para evitar loop de polling
+        mock_container = MagicMock()
+        mock_container.attrs = {"State": {}}
+        mock_container.diff.return_value = []
+        mock_client.containers.get.return_value = mock_container
 
         provider = DockerRootlessProvider(config=config, client=mock_client)
         provider.create(
@@ -181,3 +188,67 @@ class TestGetFilesystemDiff:
         result = provider.get_filesystem_diff("run-abcd1234")
 
         assert result == [{"kind": 1, "path": "/root/pwned.txt"}]
+
+
+class TestWaitForHealthy:
+    @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
+    def test_returns_no_health_when_no_healthcheck(self, _mock_detect):
+        """_wait_for_healthy() retorna 'no_health' si el contenedor no tiene HEALTHCHECK."""
+        mock_client = MagicMock()
+        provider = DockerRootlessProvider(config=FlexiPwnConfig(), client=mock_client)
+
+        mock_container = MagicMock()
+        mock_container.attrs = {"State": {}}  # sin clave "Health"
+
+        result = provider._wait_for_healthy(
+            mock_container, timeout=5.0, poll_interval=1.0
+        )
+
+        assert result == "no_health"
+
+    @patch("flexipwn.layer1.docker_rootless.time.sleep")
+    @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
+    def test_returns_timeout_after_limit(self, _mock_detect, _mock_sleep):
+        """_wait_for_healthy() retorna 'timeout' si el contenedor nunca llega a healthy."""
+        mock_client = MagicMock()
+        config = FlexiPwnConfig(healthcheck_timeout=3.0, healthcheck_poll_interval=1.0)
+        provider = DockerRootlessProvider(config=config, client=mock_client)
+
+        mock_container = MagicMock()
+        # Health presente pero siempre en "starting"
+        mock_container.attrs = {"State": {"Health": {"Status": "starting"}}}
+
+        result = provider._wait_for_healthy(
+            mock_container, timeout=3.0, poll_interval=1.0
+        )
+
+        assert result == "timeout"
+
+    @patch("flexipwn.layer1.docker_rootless.time.sleep")
+    @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
+    def test_create_passes_yaml_delay_to_baseline(self, _mock_detect, mock_sleep, tmp_path):
+        """create() con startup_delay=7.0 duerme 1s inicial + 6s restantes."""
+        mock_client = MagicMock()
+        config = FlexiPwnConfig(
+            volumes_base_path=str(tmp_path / "vols"),
+            startup_delay_seconds=3.0,
+        )
+
+        # Contenedor sin healthcheck
+        mock_container = MagicMock()
+        mock_container.attrs = {"State": {}}
+        mock_container.diff.return_value = []
+        mock_client.containers.get.return_value = mock_container
+
+        provider = DockerRootlessProvider(config=config, client=mock_client)
+        env = provider.create(
+            scenario_id="test",
+            participant_id="student-1",
+            image="ubuntu:22.04",
+            startup_delay=7.0,
+        )
+
+        assert env.baseline_strategy == "delay"
+        sleep_calls = [call.args[0] for call in mock_sleep.call_args_list]
+        assert 1.0 in sleep_calls   # sleep inicial obligatorio
+        assert 6.0 in sleep_calls   # remaining = 7.0 - 1.0

@@ -48,12 +48,18 @@ def demo_privesc() -> None:
         border_style="cyan",
     ))
 
+    flexipwn_config = FlexiPwnConfig()
+    effective_delay = (
+        scenario.environment.startup_delay_seconds
+        if scenario.environment.startup_delay_seconds is not None
+        else flexipwn_config.startup_delay_seconds
+    )
     console.print(
         f"\n[bold]Iniciando entorno...[/bold] "
-        f"[dim](timeout: {scenario.timeout_seconds}s — capturando baseline ~3s)[/dim]"
+        f"[dim](timeout: {scenario.timeout_seconds}s)[/dim]"
     )
 
-    provider = DockerRootlessProvider(config=FlexiPwnConfig())
+    provider = DockerRootlessProvider(config=flexipwn_config)
 
     # --- Crear entorno con manejo explícito de imagen no encontrada ---
     try:
@@ -63,6 +69,7 @@ def demo_privesc() -> None:
             image=scenario.environment.image,
             attacker_image=scenario.environment.attacker_image,
             ports=scenario.environment.ports or None,
+            startup_delay=scenario.environment.startup_delay_seconds,
         )
     except ImageNotFoundError:
         console.print(
@@ -75,6 +82,22 @@ def demo_privesc() -> None:
             f"  docker pull {scenario.environment.image}"
         )
         raise typer.Exit(1)
+
+    if env.baseline_strategy == "healthcheck":
+        console.print("✓ Contenedor healthy — baseline tomado.", style="green")
+    elif env.baseline_strategy == "delay":
+        console.print(
+            f"⚠ Sin HEALTHCHECK detectado — baseline tomado después de "
+            f"{effective_delay}s. Para mayor robustez, agrega HEALTHCHECK "
+            f"a tu Dockerfile.",
+            style="yellow",
+        )
+    else:  # timeout
+        console.print(
+            "⚠ HEALTHCHECK configurado pero no respondió a tiempo. "
+            "Baseline tomado igualmente. Revisa el Dockerfile.",
+            style="yellow",
+        )
 
     start_time = datetime.now(timezone.utc)
     monitor: FilesystemMonitor | None = None

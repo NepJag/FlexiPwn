@@ -86,6 +86,7 @@ class DockerRootlessProvider(EnvironmentProvider):
             self.client = docker.DockerClient(base_url=socket_url)
 
         self._baselines: dict[str, set[str]] = {}
+        self._baseline_strategies: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Helpers internos
@@ -110,6 +111,43 @@ class DockerRootlessProvider(EnvironmentProvider):
     def _network_name(self, env_id: str) -> str:
         return f"flexipwn-{env_id}"
 
+    def _wait_for_healthy(
+        self,
+        container,
+        timeout: float,
+        poll_interval: float,
+    ) -> str:
+        """
+        Espera hasta que el contenedor reporte status 'healthy'.
+
+        Retorna:
+          "healthy"   → llegó a healthy dentro del timeout
+          "timeout"   → se agotó el timeout sin llegar a healthy
+          "no_health" → el contenedor no tiene HEALTHCHECK configurado
+
+        Lanza ContainerStartError si el status es "unhealthy".
+        """
+        container.reload()
+        health = container.attrs.get("State", {}).get("Health")
+        if not health:
+            return "no_health"
+
+        elapsed = 0.0
+        while elapsed < timeout:
+            container.reload()
+            status = container.attrs["State"]["Health"]["Status"]
+            if status == "healthy":
+                return "healthy"
+            if status == "unhealthy":
+                raise ContainerStartError(
+                    f"El contenedor '{container.name}' reportó status 'unhealthy'. "
+                    f"Revisa el HEALTHCHECK del Dockerfile."
+                )
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+
+        return "timeout"
+
     def _get_container(self, env_id: str, role: str = "vulnerable"):
         name = self._container_name(env_id, role)
         try:
@@ -132,6 +170,7 @@ class DockerRootlessProvider(EnvironmentProvider):
         attacker_image: str | None = None,
         ports: list[str] | None = None,
         timeout_seconds: int = 1800,
+        startup_delay: float | None = None,
     ) -> Environment:
         env_id = _generate_env_id()
         labels = self._labels(env_id, scenario_id, participant_id)
@@ -199,14 +238,45 @@ class DockerRootlessProvider(EnvironmentProvider):
                         f"Error al iniciar contenedor atacante: {exc}"
                     )
 
-            # 5. Baseline del filesystem (ignorar cambios de startup)
-            time.sleep(self.config.startup_delay_seconds)
-            try:
-                vuln_container = self.client.containers.get(vuln_name)
-                baseline_diff = vuln_container.diff() or []
-                self._baselines[env_id] = {item["Path"] for item in baseline_diff}
-            except Exception:
-                self._baselines[env_id] = set()
+            # 5. Baseline del filesystem con estrategia robusta
+            effective_delay = (
+                startup_delay
+                if startup_delay is not None
+                else self.config.startup_delay_seconds
+            )
+
+            # Espera mínima de 1s para que arranque el proceso principal
+            time.sleep(1.0)
+
+            vuln_container = self.client.containers.get(vuln_name)
+            health_result = self._wait_for_healthy(
+                vuln_container,
+                timeout=self.config.healthcheck_timeout,
+                poll_interval=self.config.healthcheck_poll_interval,
+            )
+
+            if health_result == "healthy":
+                baseline_strategy = "healthcheck"
+            elif health_result == "no_health":
+                remaining = max(0.0, effective_delay - 1.0)
+                if remaining > 0:
+                    time.sleep(remaining)
+                baseline_strategy = "delay"
+            else:  # "timeout"
+                logger.warning(
+                    "El contenedor '%s' no reportó 'healthy' después de %.0fs. "
+                    "El baseline se tomó igualmente. Considera aumentar "
+                    "healthcheck_timeout en FlexiPwnConfig o revisar el HEALTHCHECK "
+                    "del Dockerfile.",
+                    vuln_name,
+                    self.config.healthcheck_timeout,
+                )
+                baseline_strategy = "timeout"
+
+            vuln_container.reload()
+            baseline_diff = vuln_container.diff() or []
+            self._baselines[env_id] = {item["Path"] for item in baseline_diff}
+            self._baseline_strategies[env_id] = baseline_strategy
 
             return Environment(
                 env_id=env_id,
@@ -219,6 +289,7 @@ class DockerRootlessProvider(EnvironmentProvider):
                 created_at=datetime.now(timezone.utc),
                 volume_base_path=str(vol_base),
                 volume_mappings={},
+                baseline_strategy=baseline_strategy,
             )
 
         except Exception:
@@ -271,6 +342,7 @@ class DockerRootlessProvider(EnvironmentProvider):
 
     def destroy(self, env_id: str) -> None:
         self._baselines.pop(env_id, None)
+        self._baseline_strategies.pop(env_id, None)
         timeout = self.config.container_stop_timeout
 
         # Contenedores
@@ -297,6 +369,7 @@ class DockerRootlessProvider(EnvironmentProvider):
 
     def reset(self, env_id: str) -> None:
         self._baselines.pop(env_id, None)
+        self._baseline_strategies.pop(env_id, None)
         # Obtener info del contenedor vulnerable actual
         vuln = self._get_container(env_id, "vulnerable")
         image = vuln.image.tags[0] if vuln.image.tags else vuln.image.id
@@ -405,6 +478,7 @@ class DockerRootlessProvider(EnvironmentProvider):
             created_at=created_at,
             volume_base_path=str(vol_base),
             volume_mappings={},
+            baseline_strategy=self._baseline_strategies.get(env_id, "unknown"),
         )
 
     def exec_run(

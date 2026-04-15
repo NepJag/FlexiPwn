@@ -11,6 +11,7 @@ environment:
   attacker_image: null
   log_paths: []
   ports: []
+  startup_delay_seconds: 3
 
 targets:
   - type: file_created

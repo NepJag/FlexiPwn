@@ -1,14 +1,30 @@
 """Tests de integración — requieren Docker rootless disponible."""
 
+import subprocess
+import textwrap
+
 import pytest
 
 from flexipwn.config import FlexiPwnConfig
 from flexipwn.layer1.docker_rootless import DockerRootlessProvider
-from flexipwn.layer1.provider import ExecResult, ProcessInfo
+from flexipwn.layer1.provider import ContainerStartError, ExecResult, ProcessInfo
 
 pytestmark = pytest.mark.integration
 
 TEST_IMAGE = "ubuntu:22.04"
+
+
+def _build_image(tag: str, dockerfile_content: str) -> None:
+    """Construye una imagen Docker a partir de un Dockerfile inline."""
+    result = subprocess.run(
+        ["docker", "build", "-t", tag, "-f", "-", "."],
+        input=dockerfile_content.encode(),
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"docker build falló para '{tag}':\n{result.stderr.decode()}"
+        )
 
 
 @pytest.fixture
@@ -109,4 +125,68 @@ class TestFilesystemDiff:
             created = [e for e in diff if e["path"] == "/root/test.txt"]
             assert created[0]["kind"] == 1  # kind 1 = creado
         finally:
+            provider.destroy(env.env_id)
+
+
+class TestBaselineStrategy:
+    HEALTHY_IMAGE = "flexipwn-test-healthy:latest"
+    UNHEALTHY_IMAGE = "flexipwn-test-unhealthy:latest"
+
+    @pytest.fixture(autouse=True, scope="class")
+    def build_test_images(self):
+        """Construye las imágenes mínimas necesarias para los tests de baseline."""
+        _build_image(
+            self.HEALTHY_IMAGE,
+            textwrap.dedent("""\
+                FROM ubuntu:22.04
+                HEALTHCHECK --interval=1s --timeout=1s --retries=3 CMD exit 0
+                CMD ["sleep", "infinity"]
+            """),
+        )
+        _build_image(
+            self.UNHEALTHY_IMAGE,
+            textwrap.dedent("""\
+                FROM ubuntu:22.04
+                HEALTHCHECK --interval=1s --timeout=1s --retries=1 CMD exit 1
+                CMD ["sleep", "infinity"]
+            """),
+        )
+
+    def test_create_with_healthcheck_uses_healthy_strategy(self, provider):
+        """Si la imagen tiene HEALTHCHECK válido, baseline_strategy debe ser 'healthcheck'."""
+        env = provider.create(
+            scenario_id="test-hc",
+            participant_id="tester-1",
+            image=self.HEALTHY_IMAGE,
+        )
+        try:
+            assert env.baseline_strategy == "healthcheck"
+        finally:
+            provider.destroy(env.env_id)
+
+    def test_create_without_healthcheck_uses_delay_strategy(self, provider):
+        """ubuntu:22.04 no tiene HEALTHCHECK, baseline_strategy debe ser 'delay'."""
+        config = FlexiPwnConfig(
+            volumes_base_path=provider.config.volumes_base_path,
+            startup_delay_seconds=2.0,  # delay corto para el test
+        )
+        p = DockerRootlessProvider(config=config)
+        env = p.create(
+            scenario_id="test-delay",
+            participant_id="tester-1",
+            image=TEST_IMAGE,
+        )
+        try:
+            assert env.baseline_strategy == "delay"
+        finally:
+            p.destroy(env.env_id)
+
+    def test_create_unhealthy_raises_container_start_error(self, provider):
+        """Imagen con HEALTHCHECK CMD exit 1 debe lanzar ContainerStartError."""
+        with pytest.raises(ContainerStartError, match="unhealthy"):
+            env = provider.create(
+                scenario_id="test-unhealthy",
+                participant_id="tester-1",
+                image=self.UNHEALTHY_IMAGE,
+            )
             provider.destroy(env.env_id)

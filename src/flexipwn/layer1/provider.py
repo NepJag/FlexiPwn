@@ -45,6 +45,7 @@ class Environment:
     created_at: datetime
     volume_base_path: str  # path en el host
     volume_mappings: dict[str, str]  # container_path -> host_path
+    baseline_strategy: str  # "healthcheck" | "delay" | "timeout" | "unknown"
 
 
 @dataclass
@@ -78,6 +79,7 @@ class EnvironmentProvider(ABC):
         attacker_image: str | None = None,
         ports: list[str] | None = None,
         timeout_seconds: int = 1800,
+        startup_delay: float | None = None,
     ) -> Environment:
         """Crea y levanta el entorno completo (red + contenedores + volúmenes)."""
         ...

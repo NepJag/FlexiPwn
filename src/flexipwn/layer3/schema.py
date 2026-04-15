@@ -55,6 +55,9 @@ class EnvironmentConfig(BaseModel):
     volumes: dict[str, str] = {}
     network: str | None = None
     ports: list[str] = []
+    startup_delay_seconds: float | None = None
+    # None → usa FlexiPwnConfig.startup_delay_seconds como default.
+    # 0.0 es válido: el educador confía 100% en el healthcheck y quiere delay=0.
 
 
 class ScenarioConfig(BaseModel):
