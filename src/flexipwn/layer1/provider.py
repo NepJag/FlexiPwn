@@ -1,3 +1,4 @@
+import hashlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
@@ -61,6 +62,19 @@ class ProcessInfo:
     euid: int
     ppid: str
     cmd: str
+    lstart: str       # tiempo de inicio: "Mon Oct 23 10:25:44 2023"
+    process_id: str   # sha256[:12] de "{pid}:{lstart}" — identifica unívocamente
+                      # el proceso aunque el PID se reutilice
+
+
+def make_process_id(pid: str, disambiguator: str) -> str:
+    """Hash sha256[:12] de '{pid}:{disambiguator}'.
+
+    disambiguator es cualquier string que distinga al proceso aunque su PID se reutilice.
+    En la práctica se usa 'ppid:cmd' ya que container.top() no expone lstart sin overflow.
+    """
+    raw = f"{pid}:{disambiguator}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------------------

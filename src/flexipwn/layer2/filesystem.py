@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 
@@ -13,8 +12,7 @@ from flexipwn.layer2.events import MonitorEvent
 logger = logging.getLogger(__name__)
 
 OnEventCallback = Callable[[MonitorEvent], None]
-OnStoppedCallback = Callable[[str], None]  # recibe env_id
-OnTimeoutCallback = Callable[[], None]
+OnStoppedCallback = Callable[[str], None]
 
 _KIND_TO_EVENT_TYPE: dict[int, str] = {
     0: "file_modified",
@@ -25,11 +23,14 @@ _KIND_TO_EVENT_TYPE: dict[int, str] = {
 
 class FilesystemMonitor:
     """
-    Monitorea cambios en el filesystem del contenedor usando container.diff()
-    con polling. Bloqueante: llama a run() y el proceso queda en el loop.
+    Monitorea cambios en el filesystem del contenedor usando container.diff().
 
     Principio de pasividad: no ejecuta nada dentro del contenedor,
     no modifica su estado, no monta volúmenes.
+
+    Diseñado para ser invocado vía _poll() por MonitorOrchestrator.
+    El intervalo de polling y la gestión del timeout son responsabilidad
+    del orquestador, no del monitor.
     """
 
     def __init__(
@@ -40,9 +41,6 @@ class FilesystemMonitor:
         participant_id: str,
         on_event: OnEventCallback,
         on_stopped: OnStoppedCallback | None = None,
-        on_timeout: OnTimeoutCallback | None = None,
-        poll_interval: float = 1.5,
-        timeout_seconds: int | None = None,
     ) -> None:
         self._provider = provider
         self._env_id = env_id
@@ -50,10 +48,6 @@ class FilesystemMonitor:
         self._participant_id = participant_id
         self._on_event = on_event
         self._on_stopped = on_stopped
-        self._on_timeout = on_timeout
-        self._poll_interval = poll_interval
-        self._timeout_seconds = timeout_seconds
-        self._running = False
 
         # _seen_paths: path → kind del último evento emitido.
         # kind=-1 es el centinela de baseline: paths que existían antes del
@@ -63,65 +57,31 @@ class FilesystemMonitor:
         for path in baseline:
             self._seen_paths[path] = -1
 
-    # ------------------------------------------------------------------
-    # Interfaz pública
-    # ------------------------------------------------------------------
-
-    def run(self) -> None:
-        """
-        Loop principal de monitoreo. Bloqueante.
-        Termina cuando:
-        - el contenedor se detiene o desaparece
-        - se llama a stop()
-        - KeyboardInterrupt
-        """
-        self._running = True
-        _start = time.monotonic()
-        try:
-            while self._running:
-                if self._timeout_seconds is not None:
-                    if time.monotonic() - _start >= self._timeout_seconds:
-                        logger.info("Timeout alcanzado para entorno %s.", self._env_id)
-                        if self._on_timeout:
-                            self._on_timeout()
-                        return
-                try:
-                    self._poll()
-                except (NotFound, EnvironmentNotFoundError):
-                    logger.info("Contenedor %s desaparecido, terminando monitor.", self._env_id)
-                    if self._on_stopped:
-                        self._on_stopped(self._env_id)
-                    return
-                except APIError as exc:
-                    if "is not running" in str(exc).lower():
-                        logger.info("Contenedor %s detenido, terminando monitor.", self._env_id)
-                        if self._on_stopped:
-                            self._on_stopped(self._env_id)
-                        return
-                    raise
-                if not self._running:
-                    return
-                time.sleep(self._poll_interval)
-        except KeyboardInterrupt:
-            pass
-
-    def stop(self) -> None:
-        """Señala al loop de run() que debe terminar tras el poll actual."""
-        self._running = False
-
-    # ------------------------------------------------------------------
-    # Internos
-    # ------------------------------------------------------------------
-
     def _poll(self) -> None:
         """
-        Una iteración del loop:
+        Una iteración:
         1. Obtener diff actual via provider.get_filesystem_diff(env_id)
         2. Comparar contra _seen_paths (paths ya reportados)
-        3. Para cada path nuevo o con kind cambiado, emitir MonitorEvent
+        3. Emitir MonitorEvent para paths nuevos o con kind cambiado
         4. Actualizar _seen_paths
+
+        Si el contenedor se ha detenido o desaparecido, llama on_stopped y retorna.
         """
-        diff = self._provider.get_filesystem_diff(self._env_id)
+        try:
+            diff = self._provider.get_filesystem_diff(self._env_id)
+        except (NotFound, EnvironmentNotFoundError):
+            logger.info("Contenedor %s desaparecido, terminando monitor de filesystem.", self._env_id)
+            if self._on_stopped:
+                self._on_stopped(self._env_id)
+            return
+        except APIError as exc:
+            if "is not running" in str(exc).lower():
+                logger.info("Contenedor %s detenido, terminando monitor de filesystem.", self._env_id)
+                if self._on_stopped:
+                    self._on_stopped(self._env_id)
+                return
+            raise
+
         for item in diff:
             kind: int = item["kind"]
             path: str = item["path"]
@@ -141,10 +101,6 @@ class FilesystemMonitor:
             # else: mismo kind → sin cambio, no emitir
 
     def _emit_event(self, kind: int, path: str) -> None:
-        """
-        Construye y emite un MonitorEvent.
-        kind: 0=modificado, 1=creado, 2=eliminado
-        """
         event_type = _KIND_TO_EVENT_TYPE.get(kind, "file_modified")
         event = MonitorEvent(
             timestamp=datetime.now(timezone.utc),

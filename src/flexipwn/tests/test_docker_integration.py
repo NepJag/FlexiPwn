@@ -87,6 +87,37 @@ class TestGetProcesses:
             assert isinstance(p.euid, int)
             assert p.cmd
 
+    def test_get_processes_parsed_correctly(self, provider):
+        """
+        Verifica que el parsing de get_processes() produce ProcessInfo válidos:
+        process_id de 12 caracteres hexadecimales y campos no vacíos.
+
+        Nota: lstart es "" porque container.top() limita columnas a len(Titles)
+        y usar lstart causaría overflow que mezcla campos.
+        """
+        env = provider.create(
+            scenario_id="test-parsing",
+            participant_id="tester-parsing",
+            image=TEST_IMAGE,
+        )
+        try:
+            processes = provider.get_processes(env.env_id)
+            assert len(processes) >= 1
+
+            hex_chars = set("0123456789abcdef")
+            for p in processes:
+                assert p.pid, f"pid vacío"
+                assert p.cmd, f"cmd vacío para pid={p.pid}"
+                assert p.lstart == "", f"lstart debe ser '' (no disponible vía top)"
+                assert len(p.process_id) == 12, (
+                    f"process_id tiene longitud {len(p.process_id)}, esperado 12"
+                )
+                assert all(c in hex_chars for c in p.process_id), (
+                    f"process_id no es hexadecimal: {p.process_id!r}"
+                )
+        finally:
+            provider.destroy(env.env_id)
+
 
 class TestExecRun:
     def test_returns_output(self, provider, env):

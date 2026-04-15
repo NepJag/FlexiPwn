@@ -3,7 +3,7 @@ Tests de FilesystemMonitor (Capa 2) — sin Docker real, todo mockeado.
 """
 from unittest.mock import MagicMock
 
-from docker.errors import NotFound
+from docker.errors import APIError, NotFound
 
 from flexipwn.layer2.filesystem import FilesystemMonitor
 
@@ -112,13 +112,9 @@ class TestFilesystemMonitorPoll:
         monitor, _ = _make_monitor(baseline={"/etc/apt"})
         assert monitor._seen_paths.get("/etc/apt") == -1
 
-
-class TestFilesystemMonitorRun:
-
-    def test_container_stopped_calls_on_stopped(self):
+    def test_poll_container_not_found_calls_on_stopped(self):
         """
-        Si get_filesystem_diff lanza NotFound, el monitor debe llamar on_stopped
-        con el env_id correcto y terminar el loop.
+        Si get_filesystem_diff lanza NotFound, _poll() llama on_stopped con env_id.
         """
         provider = MagicMock()
         provider._baselines = {"env-123": set()}
@@ -134,62 +130,46 @@ class TestFilesystemMonitorRun:
             on_stopped=on_stopped,
         )
 
-        monitor.run()
+        monitor._poll()
 
         on_stopped.assert_called_once_with("env-123")
 
-    def test_stop_terminates_run_loop(self):
-        """stop() debe hacer que el loop de run() termine tras el poll actual."""
+    def test_poll_api_error_not_running_calls_on_stopped(self):
+        """
+        APIError con 'is not running' en el mensaje → _poll() llama on_stopped.
+        """
         provider = MagicMock()
         provider._baselines = {"env-123": set()}
+        provider.get_filesystem_diff.side_effect = APIError("Container is not running")
 
-        call_count = 0
-
-        def diff_side_effect(env_id):
-            nonlocal call_count
-            call_count += 1
-            return []
-
-        provider.get_filesystem_diff.side_effect = diff_side_effect
-
+        on_stopped = MagicMock()
         monitor = FilesystemMonitor(
             provider=provider,
             env_id="env-123",
             scenario_id="test-scenario",
             participant_id="test-player",
             on_event=MagicMock(),
-            poll_interval=0.0,
+            on_stopped=on_stopped,
         )
 
-        # stop() se llama en on_event, pero aquí lo llamamos directamente
-        # después del primer poll via patch de sleep para que no bloquee
-        original_run = monitor.run
+        monitor._poll()
 
-        poll_calls = []
+        on_stopped.assert_called_once_with("env-123")
 
-        def patched_poll():
-            poll_calls.append(1)
-            monitor.stop()
-
-        monitor._poll = patched_poll
-        monitor.run()
-
-        # Solo debe haber llamado _poll una vez (stop() en el primero)
-        assert len(poll_calls) == 1
-
-    def test_run_handles_keyboard_interrupt_gracefully(self):
-        """KeyboardInterrupt durante run() no debe propagar la excepción."""
+    def test_poll_on_stopped_not_called_when_none(self):
+        """Si on_stopped es None, no lanza excepción cuando el contenedor desaparece."""
         provider = MagicMock()
         provider._baselines = {"env-123": set()}
-        provider.get_filesystem_diff.side_effect = KeyboardInterrupt
+        provider.get_filesystem_diff.side_effect = NotFound("gone")
 
         monitor = FilesystemMonitor(
             provider=provider,
             env_id="env-123",
-            scenario_id="test-scenario",
-            participant_id="test-player",
+            scenario_id="s",
+            participant_id="p",
             on_event=MagicMock(),
+            on_stopped=None,
         )
 
         # No debe lanzar excepción
-        monitor.run()
+        monitor._poll()

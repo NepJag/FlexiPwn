@@ -17,11 +17,16 @@ targets:
   - type: file_created
     path: "/root/"
     pattern: "*.txt"
-    description: "Archivo .txt creado en directorio root por el atacante"
+    description: "Archivo .txt creado en directorio root"
 
   - type: file_modified
     path: "/etc/passwd"
-    description: "Archivo de usuarios modificado (usuario root agregado)"
+    description: "Archivo de usuarios del sistema modificado"
+
+  - type: process_running
+    euid: 0
+    cmd_contains: "bash"
+    description: "Shell root activa (escalación exitosa via sudo vim)"
 
 condition: all
 timeout_seconds: 1800

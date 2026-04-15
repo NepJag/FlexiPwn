@@ -12,6 +12,8 @@ from flexipwn.config import FlexiPwnConfig
 from flexipwn.layer1.docker_rootless import DockerRootlessProvider
 from flexipwn.layer1.provider import ImageNotFoundError
 from flexipwn.layer2.filesystem import FilesystemMonitor
+from flexipwn.layer2.orchestrator import MonitorOrchestrator
+from flexipwn.layer2.process import ProcessMonitor
 from flexipwn.layer3.engine import EvaluationEngine, EvaluationResult
 from flexipwn.layer3.schema import load_scenario
 
@@ -100,7 +102,7 @@ def demo_privesc() -> None:
         )
 
     start_time = datetime.now(timezone.utc)
-    monitor: FilesystemMonitor | None = None
+    orchestrator: MonitorOrchestrator | None = None
 
     # --- Inyectar hints del escenario en el .bashrc del contenedor ---
     # Se escribe el bloque como base64 para evitar problemas de escaping con
@@ -142,18 +144,19 @@ def demo_privesc() -> None:
     _reported: set[int] = set()  # target_index ya impresos
 
     def handle_update(result: EvaluationResult) -> None:
-        nonlocal monitor
+        nonlocal orchestrator
 
         # Imprimir solo los targets recién matcheados (no repetir)
         for t in result.targets:
             if t.matched and t.target_index not in _reported:
                 _reported.add(t.target_index)
-                path = t.trigger_event.details.get("path", "") if t.trigger_event else ""
+                details = t.trigger_event.details if t.trigger_event else {}
+                detail_str = details.get("path") or details.get("cmd", "")
                 progress_pct = int(result.progress * 100)
                 console.print(
                     f"[green]✓[/green] Target [{t.target_index + 1}/{len(result.targets)}] "
                     f"[cyan]{t.target_type}[/cyan]: {t.description}  "
-                    f"[dim]{path}[/dim]  → [bold]{progress_pct}%[/bold]"
+                    f"[dim]{detail_str}[/dim]  → [bold]{progress_pct}%[/bold]"
                 )
 
         if not result.completed:
@@ -163,26 +166,17 @@ def demo_privesc() -> None:
         matched_targets = [t for t in result.targets if t.matched]
         lines = ["[bold green]Ejercicio completado[/bold green]", ""]
         for t in matched_targets:
-            path = t.trigger_event.details.get("path", "") if t.trigger_event else ""
-            lines.append(f"  [cyan]{t.target_type}[/cyan]  {path}")
+            details = t.trigger_event.details if t.trigger_event else {}
+            detail_str = details.get("path") or details.get("cmd", "")
+            process_id = details.get("process_id", "")
+            extra = f"  [dim]{process_id}[/dim]" if process_id else ""
+            lines.append(f"  [cyan]{t.target_type}[/cyan]  {detail_str}{extra}")
         lines += ["", f"  Tiempo: [bold]{int(elapsed.total_seconds())}s[/bold]"]
         console.print(Panel("\n".join(lines), title="Resultado", border_style="green"))
-        if monitor is not None:
-            monitor.stop()
+        if orchestrator is not None:
+            orchestrator.stop()
 
-    def handle_stopped(env_id: str) -> None:
-        console.print(f"\n[yellow]Contenedor detenido:[/yellow] {env_id}")
-
-    def handle_timeout() -> None:
-        elapsed = datetime.now(timezone.utc) - start_time
-        console.print(
-            f"\n[red]Tiempo agotado[/red] ({int(elapsed.total_seconds())}s). "
-            f"El ejercicio no fue completado."
-        )
-        if monitor is not None:
-            monitor.stop()
-
-    # --- Engine + Monitor ---
+    # --- Engine + Monitores ---
     engine = EvaluationEngine(
         scenario=scenario,
         scenario_id=scenario_id,
@@ -191,23 +185,48 @@ def demo_privesc() -> None:
         on_update=handle_update,
     )
 
-    monitor = FilesystemMonitor(
+    fs_monitor = FilesystemMonitor(
         provider=provider,
         env_id=env.env_id,
         scenario_id=scenario_id,
         participant_id=participant_id,
         on_event=engine.process_event,
-        on_stopped=handle_stopped,
-        on_timeout=handle_timeout,
-        timeout_seconds=scenario.timeout_seconds,
     )
 
-    console.print("[bold]Monitoreando...[/bold] [dim](Ctrl+C para detener)[/dim]\n")
+    proc_monitor = ProcessMonitor(
+        provider=provider,
+        env_id=env.env_id,
+        scenario_id=scenario_id,
+        participant_id=participant_id,
+        on_event=engine.process_event,
+    )
+
+    def handle_timeout() -> None:
+        elapsed = datetime.now(timezone.utc) - start_time
+        console.print(
+            f"\n[red]Tiempo agotado[/red] ({int(elapsed.total_seconds())}s). "
+            f"El ejercicio no fue completado."
+        )
+        orchestrator.stop()
+
+    orchestrator = MonitorOrchestrator(
+        fs_monitor,
+        proc_monitor,
+        timeout_seconds=scenario.timeout_seconds,
+        on_timeout=handle_timeout,
+    )
+
+    def handle_stopped(env_id: str) -> None:
+        console.print(f"\n[yellow]⚠ Contenedor detenido inesperadamente:[/yellow] {env_id}")
+        orchestrator.stop()
+
+    fs_monitor._on_stopped = handle_stopped
+    proc_monitor._on_stopped = handle_stopped
+
+    console.print("[bold]Monitoreando filesystem y procesos...[/bold] [dim](Ctrl+C para detener)[/dim]\n")
 
     try:
-        monitor.run()
-    except KeyboardInterrupt:
-        pass
+        orchestrator.run()
     finally:
         console.print("\n[dim]Destruyendo entorno...[/dim]")
         try:

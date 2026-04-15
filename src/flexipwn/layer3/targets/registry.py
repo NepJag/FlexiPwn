@@ -5,11 +5,13 @@ from flexipwn.layer3.targets.filesystem import (
     FileExistsEvaluator,
     FileModifiedEvaluator,
 )
+from flexipwn.layer3.targets.process import ProcessRunningEvaluator
 
 _EVALUATORS: dict[str, type[TargetEvaluator]] = {
     "file_created": FileCreatedEvaluator,
     "file_modified": FileModifiedEvaluator,
     "file_exists": FileExistsEvaluator,
+    "process_running": ProcessRunningEvaluator,
 }
 
 

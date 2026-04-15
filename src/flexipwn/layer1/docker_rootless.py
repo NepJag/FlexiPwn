@@ -22,6 +22,7 @@ from flexipwn.layer1.provider import (
     ProcessInfo,
     ProviderError,
     SocketNotFoundError,
+    make_process_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -525,21 +526,38 @@ class DockerRootlessProvider(EnvironmentProvider):
     def get_processes(self, env_id: str) -> list[ProcessInfo]:
         c = self._get_container(env_id, "vulnerable")
         try:
-            top_result = c.top(ps_args="-eo pid,ppid,euid,cmd")
+            # Docker divide cada línea con maxsplit = len(titles) - 1.
+            # Con 4 headers [PID, EUID, PPID, CMD] obtenemos exactamente 4 columnas
+            # y CMD absorbe la línea completa con argumentos incluidos.
+            # No usamos lstart porque causaría overflow: Docker limitaría la fila
+            # a 5 columnas y el último campo mezclaría HH:MM:SS con euid/ppid/cmd.
+            top_result = c.top(ps_args="-o pid,euid,ppid,cmd")
         except APIError as exc:
             raise ProviderError(f"Error obteniendo procesos: {exc}")
 
         processes: list[ProcessInfo] = []
         for row in top_result.get("Processes", []):
-            # Cada row es una lista: [pid, ppid, euid, cmd]
+            # Esperamos [pid, euid, ppid, cmd_completo]
             if len(row) < 4:
                 continue
+            pid = row[0].strip()
+            try:
+                euid = int(row[1].strip())
+            except ValueError:
+                continue
+            ppid = row[2].strip()
+            cmd = " ".join(row[3:]).strip()
+            # process_id: hash de "pid:ppid:cmd" para distinguir procesos
+            # aunque el PID se reutilice (distinto ppid o cmd → distinto hash).
+            process_id = make_process_id(pid, f"{ppid}:{cmd}")
             processes.append(
                 ProcessInfo(
-                    pid=row[0].strip(),
-                    ppid=row[1].strip(),
-                    euid=int(row[2].strip()),
-                    cmd=" ".join(row[3:]).strip(),
+                    pid=pid,
+                    euid=euid,
+                    ppid=ppid,
+                    cmd=cmd,
+                    lstart="",  # no disponible vía container.top() sin overflow de columnas
+                    process_id=process_id,
                 )
             )
         return processes
