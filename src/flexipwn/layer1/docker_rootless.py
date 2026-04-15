@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,6 +84,8 @@ class DockerRootlessProvider(EnvironmentProvider):
         else:
             socket_url = self.config.docker_socket or _detect_socket()
             self.client = docker.DockerClient(base_url=socket_url)
+
+        self._baselines: dict[str, set[str]] = {}
 
     # ------------------------------------------------------------------
     # Helpers internos
@@ -196,6 +199,15 @@ class DockerRootlessProvider(EnvironmentProvider):
                         f"Error al iniciar contenedor atacante: {exc}"
                     )
 
+            # 5. Baseline del filesystem (ignorar cambios de startup)
+            time.sleep(self.config.startup_delay_seconds)
+            try:
+                vuln_container = self.client.containers.get(vuln_name)
+                baseline_diff = vuln_container.diff() or []
+                self._baselines[env_id] = {item["Path"] for item in baseline_diff}
+            except Exception:
+                self._baselines[env_id] = set()
+
             return Environment(
                 env_id=env_id,
                 scenario_id=scenario_id,
@@ -258,6 +270,7 @@ class DockerRootlessProvider(EnvironmentProvider):
             shutil.rmtree(vol_base, ignore_errors=True)
 
     def destroy(self, env_id: str) -> None:
+        self._baselines.pop(env_id, None)
         timeout = self.config.container_stop_timeout
 
         # Contenedores
@@ -283,6 +296,7 @@ class DockerRootlessProvider(EnvironmentProvider):
             shutil.rmtree(vol_base)
 
     def reset(self, env_id: str) -> None:
+        self._baselines.pop(env_id, None)
         # Obtener info del contenedor vulnerable actual
         vuln = self._get_container(env_id, "vulnerable")
         image = vuln.image.tags[0] if vuln.image.tags else vuln.image.id
@@ -427,7 +441,12 @@ class DockerRootlessProvider(EnvironmentProvider):
             raise ProviderError(f"Error obteniendo diff del filesystem: {exc}")
         if diff is None:
             return []
-        return [{"kind": item["Kind"], "path": item["Path"]} for item in diff]
+        baseline = self._baselines.get(env_id, set())
+        return [
+            {"kind": item["Kind"], "path": item["Path"]}
+            for item in diff
+            if item["Path"] not in baseline
+        ]
 
     def get_processes(self, env_id: str) -> list[ProcessInfo]:
         c = self._get_container(env_id, "vulnerable")
