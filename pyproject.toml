@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-flexipwn = "flexipwn.layer4.cli:app"
+flexipwn = "flexipwn.cli.main:app"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-mock>=3.0"]

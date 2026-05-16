@@ -60,6 +60,19 @@ class MonitorOrchestrator:
         self._on_timeout = on_timeout
         self._running = False
 
+    def _poll_all(self) -> None:
+        """Ejecuta un ciclo de poll de todos los monitores activos."""
+        self._fs._poll()
+        self._proc._poll()
+        if self._log is not None:
+            self._log._poll()
+        if self._net is not None:
+            self._net._poll()
+
+    def poll_once(self) -> None:
+        """Ejecuta exactamente un ciclo de poll sin dormir ni chequear timeout."""
+        self._poll_all()
+
     def run(self) -> None:
         """Loop bloqueante. Llama _poll() de cada monitor por ciclo."""
         self._running = True
@@ -71,12 +84,7 @@ class MonitorOrchestrator:
                         if self._on_timeout:
                             self._on_timeout()
                         return
-                self._fs._poll()
-                self._proc._poll()
-                if self._log is not None:
-                    self._log._poll()
-                if self._net is not None:
-                    self._net._poll()
+                self._poll_all()
                 time.sleep(self._poll_interval)
         except KeyboardInterrupt:
             pass

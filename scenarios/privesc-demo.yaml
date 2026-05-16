@@ -35,4 +35,4 @@ targets:
     description: "Shell root lanzada desde vim (escalación exitosa)"
 
 condition: all
-timeout_seconds: 1800
+timeout_seconds: 18000
