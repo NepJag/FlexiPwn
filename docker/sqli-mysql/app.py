@@ -25,7 +25,7 @@ def log_event(event_type, **kwargs):
 
 def get_db():
     return pymysql.connect(
-        host="localhost",
+        host="127.0.0.1",
         user="webapp",
         password="webapp123",
         database="webapp",
@@ -91,4 +91,4 @@ def login():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5001, debug=False)

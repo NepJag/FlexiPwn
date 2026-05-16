@@ -32,6 +32,8 @@ LABEL_ENV_ID = "flexipwn.env_id"
 LABEL_SCENARIO_ID = "flexipwn.scenario_id"
 LABEL_PARTICIPANT_ID = "flexipwn.participant_id"
 
+SNIFFER_IMAGE = "nicolaka/netshoot"
+
 
 def _generate_env_id() -> str:
     return f"run-{uuid.uuid4().hex[:8]}"
@@ -143,7 +145,53 @@ class DockerRootlessProvider(EnvironmentProvider):
         return f"flexipwn-{env_id}-{role}"
 
     def _network_name(self, env_id: str) -> str:
+        """Nombre de la red interna (vulnerable ↔ attacker, sin egress)."""
         return f"flexipwn-{env_id}"
+
+    def _external_network_name(self, env_id: str) -> str:
+        """Nombre de la red externa (attacker ↔ host, port bindings)."""
+        return f"flexipwn-{env_id}-ext"
+
+    def _create_network(self, env_id: str) -> tuple[str, str]:
+        """
+        Crea dos redes para el entorno:
+        - Interna (internal=True): vulnerable ↔ attacker. Sin egress al host.
+        - Externa (internal=False): attacker ↔ host. Habilita port bindings.
+
+        Retorna (internal_net_name, external_net_name).
+        """
+        base_labels = {
+            LABEL_MANAGED: "true",
+            LABEL_ENV_ID: env_id,
+        }
+        internal_name = self._network_name(env_id)
+        self.client.networks.create(
+            internal_name,
+            driver="bridge",
+            internal=True,
+            check_duplicate=True,
+            labels=base_labels,
+        )
+        external_name = self._external_network_name(env_id)
+        self.client.networks.create(
+            external_name,
+            driver="bridge",
+            internal=False,
+            check_duplicate=True,
+            labels=base_labels,
+        )
+        return internal_name, external_name
+
+    def _destroy_network(self, env_id: str) -> None:
+        """Elimina ambas redes del entorno (interna y externa)."""
+        for net_name in (self._network_name(env_id), self._external_network_name(env_id)):
+            try:
+                net = self.client.networks.get(net_name)
+                net.remove()
+            except NotFound:
+                pass
+            except Exception as exc:
+                logger.warning("Error eliminando red %s: %s", net_name, exc)
 
     def _wait_for_healthy(
         self,
@@ -182,6 +230,49 @@ class DockerRootlessProvider(EnvironmentProvider):
 
         return "timeout"
 
+    def _capture_dir(self, env_id: str) -> Path:
+        return self._volume_base(env_id) / "capture"
+
+    def _create_sniffer(self, env_id: str, capture_filter: str = "") -> None:
+        capture_dir = self._capture_dir(env_id)
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(capture_dir, 0o700)
+        vuln_name = self._container_name(env_id, "vulnerable")
+        sniffer_name = self._container_name(env_id, "sniffer")
+        base_cmd = "tcpdump -i any -A -n -l 2>/dev/null"
+        if capture_filter:
+            cmd = f"{base_cmd} {capture_filter} > /capture/traffic.txt"
+        else:
+            cmd = f"{base_cmd} > /capture/traffic.txt"
+        self.client.containers.run(
+            SNIFFER_IMAGE,
+            name=sniffer_name,
+            network_mode=f"container:{vuln_name}",
+            command=["sh", "-c", cmd],
+            volumes={str(capture_dir): {"bind": "/capture", "mode": "rw"}},
+            labels={"flexipwn.managed": "true", "flexipwn.env_id": env_id},
+            detach=True,
+            remove=False,
+        )
+
+    def _destroy_sniffer(self, env_id: str) -> None:
+        name = self._container_name(env_id, "sniffer")
+        try:
+            c = self.client.containers.get(name)
+            c.stop(timeout=self.config.container_stop_timeout)
+            c.remove(force=True)
+        except NotFound:
+            pass
+        except Exception as exc:
+            logger.warning("Error eliminando sniffer %s: %s", name, exc)
+        shutil.rmtree(self._capture_dir(env_id), ignore_errors=True)
+
+    def get_capture_host_path(self, env_id: str) -> Path | None:
+        capture_dir = self._capture_dir(env_id)
+        if not capture_dir.exists():
+            return None
+        return capture_dir / "traffic.txt"
+
     def _get_container(self, env_id: str, role: str = "vulnerable"):
         name = self._container_name(env_id, role)
         try:
@@ -203,19 +294,22 @@ class DockerRootlessProvider(EnvironmentProvider):
         image: str,
         attacker_image: str | None = None,
         ports: list[str] | None = None,
+        attacker_ports: list[str] | None = None,
         log_paths: list[str] | None = None,
         timeout_seconds: int = 1800,
         startup_delay: float | None = None,
+        enable_network_capture: bool = False,
+        capture_filter: str = "",
     ) -> Environment:
         env_id = _generate_env_id()
         labels = self._labels(env_id, scenario_id, participant_id)
-        net_name = self._network_name(env_id)
         vol_base = self._volume_base(env_id)
 
         # Recursos creados (para rollback)
         created_dirs = False
         created_network = False
         created_vulnerable = False
+        created_sniffer = False
 
         try:
             # 1. Directorio base de volúmenes
@@ -237,26 +331,29 @@ class DockerRootlessProvider(EnvironmentProvider):
                 log_volumes[str(host_log_dir)] = {"bind": container_dir, "mode": "rw"}
 
             # 1c. Parsear ports ["host:container"] → {container_port/tcp: host_port}
-            port_bindings: dict[str, int] = {}
-            for port_spec in (ports or []):
-                parts = port_spec.split(":")
-                if len(parts) == 2:
-                    host_port, container_port = parts
-                    port_bindings[f"{container_port}/tcp"] = int(host_port)
+            def _parse_port_bindings(specs: list[str] | None) -> dict[str, int]:
+                bindings: dict[str, int] = {}
+                for port_spec in (specs or []):
+                    parts = port_spec.split(":")
+                    if len(parts) == 2:
+                        host_port, container_port = parts
+                        bindings[f"{container_port}/tcp"] = int(host_port)
+                return bindings
 
-            # 2. Red interna
-            self.client.networks.create(
-                net_name, driver="bridge", internal=True, labels=labels
-            )
+            port_bindings = _parse_port_bindings(ports)
+            attacker_port_bindings = _parse_port_bindings(attacker_ports)
+
+            # 2. Redes (interna para vuln↔attacker, externa para attacker↔host)
+            internal_net_name, external_net_name = self._create_network(env_id)
             created_network = True
 
-            # 3. Contenedor vulnerable
+            # 3. Contenedor vulnerable — solo en la red interna (sin egress)
             vuln_name = self._container_name(env_id, "vulnerable")
             try:
                 self.client.containers.run(
                     image,
                     name=vuln_name,
-                    network=net_name,
+                    network=internal_net_name,
                     labels=labels,
                     detach=True,
                     stdin_open=True,  # mantiene el contenedor vivo
@@ -272,20 +369,23 @@ class DockerRootlessProvider(EnvironmentProvider):
                 )
             created_vulnerable = True
 
-            # 4. Contenedor atacante (opcional)
+            # 4. Contenedor atacante (opcional) — arranca en la red externa
+            # (no internal) para que Docker pueda publicar los port bindings
+            # al host, y luego se conecta también a la red interna para
+            # comunicarse con el vulnerable sin egress.
             attacker_name: str | None = None
-            print(attacker_image)
             if attacker_image is not None:
                 attacker_name = self._container_name(env_id, "attacker")
                 try:
                     self.client.containers.run(
                         attacker_image,
                         name=attacker_name,
-                        network=net_name,
+                        network=external_net_name,
                         labels=labels,
                         detach=True,
                         stdin_open=True,
                         stop_signal="SIGTERM",
+                        ports=attacker_port_bindings if attacker_port_bindings else None,
                     )
                 except ImageNotFound:
                     raise ImageNotFoundError(
@@ -295,6 +395,9 @@ class DockerRootlessProvider(EnvironmentProvider):
                     raise ContainerStartError(
                         f"Error al iniciar contenedor atacante: {exc}"
                     )
+
+                int_net = self.client.networks.get(internal_net_name)
+                int_net.connect(attacker_name)
 
             # 5. Baseline del filesystem con estrategia robusta
             effective_delay = (
@@ -336,6 +439,10 @@ class DockerRootlessProvider(EnvironmentProvider):
             self._baselines[env_id] = {item["Path"] for item in baseline_diff}
             self._baseline_strategies[env_id] = baseline_strategy
 
+            if enable_network_capture:
+                self._create_sniffer(env_id, capture_filter=capture_filter)
+                created_sniffer = True
+
             # volume_mappings: container_log_path → host_log_dir (directorio)
             volume_mappings = {
                 container_log_path: str(
@@ -350,7 +457,7 @@ class DockerRootlessProvider(EnvironmentProvider):
                 participant_id=participant_id,
                 container_vulnerable_name=vuln_name,
                 container_attacker_name=attacker_name,
-                network_name=net_name,
+                network_name=internal_net_name,
                 status="running",
                 created_at=datetime.now(timezone.utc),
                 volume_base_path=str(vol_base),
@@ -360,7 +467,7 @@ class DockerRootlessProvider(EnvironmentProvider):
 
         except Exception:
             # Rollback: limpiar todo lo que se haya creado parcialmente
-            self._rollback(env_id, created_vulnerable, created_network, created_dirs)
+            self._rollback(env_id, created_vulnerable, created_network, created_dirs, has_sniffer=created_sniffer)
             raise
 
     def _rollback(
@@ -369,8 +476,13 @@ class DockerRootlessProvider(EnvironmentProvider):
         has_vulnerable: bool,
         has_network: bool,
         has_dirs: bool,
+        has_sniffer: bool = False,
     ) -> None:
         """Limpia recursos creados parcialmente durante un create() fallido."""
+        # Sniffer primero — depende del namespace de red del vulnerable
+        if has_sniffer:
+            self._destroy_sniffer(env_id)
+
         # Contenedor atacante (puede existir o no)
         try:
             c = self.client.containers.get(
@@ -394,13 +506,7 @@ class DockerRootlessProvider(EnvironmentProvider):
                 logger.warning("Rollback: error eliminando vulnerable: %s", exc)
 
         if has_network:
-            try:
-                net = self.client.networks.get(self._network_name(env_id))
-                net.remove()
-            except NotFound:
-                pass
-            except Exception as exc:
-                logger.warning("Rollback: error eliminando red: %s", exc)
+            self._destroy_network(env_id)
 
         if has_dirs:
             vol_base = self._volume_base(env_id)
@@ -410,6 +516,9 @@ class DockerRootlessProvider(EnvironmentProvider):
         self._baselines.pop(env_id, None)
         self._baseline_strategies.pop(env_id, None)
         timeout = self.config.container_stop_timeout
+
+        # Sniffer primero (depende del namespace de red del vulnerable)
+        self._destroy_sniffer(env_id)
 
         # Contenedores
         for role in ("vulnerable", "attacker"):
@@ -421,12 +530,8 @@ class DockerRootlessProvider(EnvironmentProvider):
             except NotFound:
                 pass
 
-        # Red
-        try:
-            net = self.client.networks.get(self._network_name(env_id))
-            net.remove()
-        except NotFound:
-            pass
+        # Redes (interna + externa)
+        self._destroy_network(env_id)
 
         # Volúmenes (directorios)
         vol_base = self._volume_base(env_id)
@@ -469,14 +574,15 @@ class DockerRootlessProvider(EnvironmentProvider):
                 pass
 
         all_labels = self._labels(env_id, scenario_id, participant_id)
-        net_name = self._network_name(env_id)
+        internal_net_name = self._network_name(env_id)
+        external_net_name = self._external_network_name(env_id)
 
         # Recrear contenedor vulnerable (sin bind mounts)
         try:
             self.client.containers.run(
                 image,
                 name=self._container_name(env_id, "vulnerable"),
-                network=net_name,
+                network=internal_net_name,
                 labels=all_labels,
                 detach=True,
                 stdin_open=True,
@@ -487,18 +593,21 @@ class DockerRootlessProvider(EnvironmentProvider):
                 f"Error al reiniciar contenedor vulnerable: {exc}"
             )
 
-        # Recrear contenedor atacante si existía
+        # Recrear contenedor atacante si existía — interno + externo
         if attacker_image is not None:
+            attacker_name = self._container_name(env_id, "attacker")
             try:
                 self.client.containers.run(
                     attacker_image,
-                    name=self._container_name(env_id, "attacker"),
-                    network=net_name,
+                    name=attacker_name,
+                    network=internal_net_name,
                     labels=all_labels,
                     detach=True,
                     stdin_open=True,
                     stop_signal="SIGTERM",
                 )
+                ext_net = self.client.networks.get(external_net_name)
+                ext_net.connect(attacker_name)
             except APIError as exc:
                 raise ContainerStartError(
                     f"Error al reiniciar contenedor atacante: {exc}"

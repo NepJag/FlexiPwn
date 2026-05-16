@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 class MonitorEvent(BaseModel):
     timestamp: datetime
-    monitor_type: Literal["filesystem", "process", "log"]
+    monitor_type: Literal["filesystem", "process", "log", "network"]
     event_type: str
     env_id: str
     participant_id: str

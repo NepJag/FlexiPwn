@@ -23,9 +23,9 @@ COPY app.py /app.py
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
-EXPOSE 5000
+EXPOSE 5001
 
 HEALTHCHECK --interval=3s --timeout=3s --start-period=20s --retries=10 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" || exit 1
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')" || exit 1
 
 CMD ["/start.sh"]

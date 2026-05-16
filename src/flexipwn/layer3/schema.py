@@ -12,6 +12,8 @@ class TargetConfig(BaseModel):
         "file_exists",
         "process_running",
         "log_pattern",
+        "network_payload",
+        "network_connection",
         "http_response_contains",
         "database_query_result",
         # Nodos lógicos — se evalúan recursivamente en el engine
@@ -31,8 +33,11 @@ class TargetConfig(BaseModel):
     cmd_contains: str | None = None
     ppid_cmd_contains: str | None = None   # filtro adicional: substring en cmd del padre
     ancestor_contains: str | None = None   # filtro adicional: substring en cualquier ancestro
-    # Campos de log
+    # Campos de log y network_payload
     field_matches: dict[str, Any] | None = None
+    # Campos network_connection
+    dst_port: int | None = None
+    dst_ip: str | None = None
     # Campos HTTP
     url_path: str | None = None
     body_contains: str | None = None
@@ -52,6 +57,12 @@ class TargetConfig(BaseModel):
         if self.type == "log_pattern":
             if self.field_matches is None:
                 raise ValueError("log_pattern requiere 'field_matches'")
+        if self.type == "network_payload":
+            if self.field_matches is None:
+                raise ValueError("network_payload requiere 'field_matches'")
+        if self.type == "network_connection":
+            if self.dst_port is None:
+                raise ValueError("network_connection requiere 'dst_port'")
         if self.type in ("and", "or"):
             if not self.targets or len(self.targets) < 2:
                 raise ValueError(
@@ -75,7 +86,9 @@ class EnvironmentConfig(BaseModel):
     log_paths: list[str] = []
     volumes: dict[str, str] = {}
     network: str | None = None
-    ports: list[str] = []
+    ports: list[str] = []          # mapeos host:container del contenedor vulnerable
+    attacker_ports: list[str] = []  # mapeos host:container del contenedor atacante
+    capture_filter: str = ""
     startup_delay_seconds: float | None = None
     # None → usa FlexiPwnConfig.startup_delay_seconds como default.
     # 0.0 es válido: el educador confía 100% en el healthcheck y quiere delay=0.

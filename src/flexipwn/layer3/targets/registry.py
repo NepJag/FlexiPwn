@@ -6,6 +6,7 @@ from flexipwn.layer3.targets.filesystem import (
     FileModifiedEvaluator,
 )
 from flexipwn.layer3.targets.log import LogPatternEvaluator
+from flexipwn.layer3.targets.network import NetworkConnectionEvaluator, NetworkPayloadEvaluator
 from flexipwn.layer3.targets.process import ProcessRunningEvaluator
 
 _EVALUATORS: dict[str, type[TargetEvaluator]] = {
@@ -14,6 +15,8 @@ _EVALUATORS: dict[str, type[TargetEvaluator]] = {
     "file_exists": FileExistsEvaluator,
     "process_running": ProcessRunningEvaluator,
     "log_pattern": LogPatternEvaluator,
+    "network_payload": NetworkPayloadEvaluator,
+    "network_connection": NetworkConnectionEvaluator,
 }
 
 

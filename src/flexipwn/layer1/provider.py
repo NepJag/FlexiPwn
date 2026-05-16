@@ -93,8 +93,11 @@ class EnvironmentProvider(ABC):
         image: str,
         attacker_image: str | None = None,
         ports: list[str] | None = None,
+        attacker_ports: list[str] | None = None,
         timeout_seconds: int = 1800,
         startup_delay: float | None = None,
+        enable_network_capture: bool = False,
+        capture_filter: str = "",
     ) -> Environment:
         """Crea y levanta el entorno completo (red + contenedores + volúmenes)."""
         ...

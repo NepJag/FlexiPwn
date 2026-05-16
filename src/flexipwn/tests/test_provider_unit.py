@@ -71,8 +71,10 @@ class TestRollbackOnFailure:
                 image="ubuntu:22.04",
             )
 
-        # Verificar que se hizo rollback de la red
-        mock_network.remove.assert_called_once()
+        # Verificar que se hizo rollback de ambas redes (interna + externa)
+        assert mock_network.remove.call_count == 2
+        # Verificar que se crearon dos redes durante create()
+        assert mock_client.networks.create.call_count == 2
 
         # Verificar que se limpiaron los directorios
         vols_dir = tmp_path / "vols"
@@ -383,3 +385,197 @@ class TestGetProcesses:
         # Visita B (agrega "procB"), luego A (agrega "procA"),
         # luego intenta B de nuevo (ya visitado) → para
         assert result == ["procB", "procA"]
+
+
+class TestDualNetworkIsolation:
+
+    @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
+    def test_vulnerable_not_on_external_network(self, _mock_detect, tmp_path):
+        """El contenedor vulnerable se conecta solo a la red interna."""
+        mock_client = MagicMock()
+        mock_network = MagicMock()
+        mock_container = MagicMock()
+        mock_container.attrs = {"State": {"Health": None}}
+        mock_container.diff.return_value = []
+        mock_client.networks.create.return_value = mock_network
+        mock_client.networks.get.return_value = mock_network
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.return_value = mock_container
+
+        config = FlexiPwnConfig(volumes_base_path=str(tmp_path / "vols"))
+        provider = DockerRootlessProvider(config=config, client=mock_client)
+
+        with patch("time.sleep"):
+            env = provider.create(
+                scenario_id="test",
+                participant_id="player",
+                image="vuln-image",
+            )
+
+        # Primera llamada a containers.run = vulnerable
+        vuln_kwargs = mock_client.containers.run.call_args_list[0].kwargs
+        assert vuln_kwargs["network"] == provider._network_name(env.env_id)
+        assert vuln_kwargs["network"] != provider._external_network_name(env.env_id)
+        # El vulnerable nunca pasa por ext_net.connect
+        assert mock_network.connect.call_count == 0
+
+    @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
+    def test_attacker_connected_to_both_networks(self, _mock_detect, tmp_path):
+        """El atacante arranca en la red externa (para publicar puertos al host) y se conecta también a la interna."""
+        mock_client = MagicMock()
+        mock_internal_net = MagicMock(name="internal_net")
+        mock_external_net = MagicMock(name="external_net")
+        mock_container = MagicMock()
+        mock_container.attrs = {"State": {"Health": None}}
+        mock_container.diff.return_value = []
+        mock_client.networks.create.return_value = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.return_value = mock_container
+
+        def fake_networks_get(name):
+            if name.endswith("-ext"):
+                return mock_external_net
+            return mock_internal_net
+        mock_client.networks.get.side_effect = fake_networks_get
+
+        config = FlexiPwnConfig(volumes_base_path=str(tmp_path / "vols"))
+        provider = DockerRootlessProvider(config=config, client=mock_client)
+
+        with patch("time.sleep"):
+            env = provider.create(
+                scenario_id="test",
+                participant_id="player",
+                image="vuln-image",
+                attacker_image="atk-image",
+            )
+
+        # Segunda llamada a containers.run = atacante, en la red externa
+        atk_kwargs = mock_client.containers.run.call_args_list[1].kwargs
+        assert atk_kwargs["network"] == provider._external_network_name(env.env_id)
+        # Y se conectó a la interna después
+        mock_internal_net.connect.assert_called_once_with(
+            provider._container_name(env.env_id, "attacker")
+        )
+        # La externa NUNCA recibe connect() — el atacante ya nació allí
+        mock_external_net.connect.assert_not_called()
+
+    @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
+    def test_destroy_removes_both_networks(self, _mock_detect, tmp_path):
+        """_destroy_network() pide ambas redes a Docker y las elimina."""
+        mock_client = MagicMock()
+        mock_internal_net = MagicMock(name="internal_net")
+        mock_external_net = MagicMock(name="external_net")
+
+        def fake_networks_get(name):
+            if name.endswith("-ext"):
+                return mock_external_net
+            return mock_internal_net
+        mock_client.networks.get.side_effect = fake_networks_get
+
+        config = FlexiPwnConfig(volumes_base_path=str(tmp_path / "vols"))
+        provider = DockerRootlessProvider(config=config, client=mock_client)
+
+        provider._destroy_network("run-abc123")
+
+        # Se consultaron ambos nombres
+        called_names = [c.args[0] for c in mock_client.networks.get.call_args_list]
+        assert "flexipwn-run-abc123" in called_names
+        assert "flexipwn-run-abc123-ext" in called_names
+        # Y se removió cada una exactamente una vez
+        mock_internal_net.remove.assert_called_once()
+        mock_external_net.remove.assert_called_once()
+
+
+class TestAttackerPortsRouting:
+
+    @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
+    def test_attacker_ports_applied_only_to_attacker_container(self, _mock_detect, tmp_path):
+        """ports → contenedor vulnerable; attacker_ports → contenedor atacante."""
+        mock_client = MagicMock()
+        mock_network = MagicMock()
+        mock_container = MagicMock()
+        mock_container.attrs = {"State": {"Health": None}}
+        mock_container.diff.return_value = []
+        mock_client.networks.create.return_value = mock_network
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.return_value = mock_container
+
+        config = FlexiPwnConfig(volumes_base_path=str(tmp_path / "vols"))
+        provider = DockerRootlessProvider(config=config, client=mock_client)
+
+        with patch("time.sleep"):
+            provider.create(
+                scenario_id="test",
+                participant_id="player",
+                image="vuln-image",
+                attacker_image="atk-image",
+                ports=["5000:5000"],
+                attacker_ports=["2222:22"],
+            )
+
+        runs = mock_client.containers.run.call_args_list
+        assert len(runs) == 2
+        vuln_kwargs = runs[0].kwargs
+        atk_kwargs = runs[1].kwargs
+        assert vuln_kwargs["name"].endswith("-vulnerable")
+        assert atk_kwargs["name"].endswith("-attacker")
+        assert vuln_kwargs["ports"] == {"5000/tcp": 5000}
+        assert atk_kwargs["ports"] == {"22/tcp": 2222}
+
+    @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
+    def test_attacker_without_ports_passes_none(self, _mock_detect, tmp_path):
+        """Sin attacker_ports el contenedor atacante se levanta con ports=None."""
+        mock_client = MagicMock()
+        mock_network = MagicMock()
+        mock_container = MagicMock()
+        mock_container.attrs = {"State": {"Health": None}}
+        mock_container.diff.return_value = []
+        mock_client.networks.create.return_value = mock_network
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.return_value = mock_container
+
+        config = FlexiPwnConfig(volumes_base_path=str(tmp_path / "vols"))
+        provider = DockerRootlessProvider(config=config, client=mock_client)
+
+        with patch("time.sleep"):
+            provider.create(
+                scenario_id="test",
+                participant_id="player",
+                image="vuln-image",
+                attacker_image="atk-image",
+            )
+
+        atk_kwargs = mock_client.containers.run.call_args_list[1].kwargs
+        assert atk_kwargs["ports"] is None
+
+
+class TestSnifferCaptureFilter:
+
+    @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
+    def test_create_sniffer_appends_capture_filter_to_command(self, _mock_detect, tmp_path):
+        """Cuando capture_filter está presente, el comando de tcpdump lo incluye al final."""
+        mock_client = MagicMock()
+        config = FlexiPwnConfig(volumes_base_path=str(tmp_path / "vols"))
+        provider = DockerRootlessProvider(config=config, client=mock_client)
+
+        provider._create_sniffer("run-abc123", capture_filter="port 3306")
+
+        mock_client.containers.run.assert_called_once()
+        kwargs = mock_client.containers.run.call_args.kwargs
+        cmd = kwargs["command"]
+        assert cmd[0] == "sh"
+        assert cmd[1] == "-c"
+        assert "tcpdump -i any -A -n -l 2>/dev/null" in cmd[2]
+        assert cmd[2].endswith("port 3306 > /capture/traffic.txt")
+
+    @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
+    def test_create_sniffer_without_filter_keeps_default_command(self, _mock_detect, tmp_path):
+        """Sin capture_filter (default ""), el comando no añade filtro alguno."""
+        mock_client = MagicMock()
+        config = FlexiPwnConfig(volumes_base_path=str(tmp_path / "vols"))
+        provider = DockerRootlessProvider(config=config, client=mock_client)
+
+        provider._create_sniffer("run-abc123")
+
+        cmd = mock_client.containers.run.call_args.kwargs["command"]
+        assert cmd[2] == "tcpdump -i any -A -n -l 2>/dev/null > /capture/traffic.txt"

@@ -1,5 +1,7 @@
 CREATE USER 'webapp'@'localhost' IDENTIFIED WITH mysql_native_password BY 'webapp123';
 GRANT ALL ON webapp.* TO 'webapp'@'localhost';
+CREATE USER 'webapp'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'webapp123';
+GRANT ALL ON webapp.* TO 'webapp'@'127.0.0.1';
 
 CREATE DATABASE IF NOT EXISTS webapp;
 USE webapp;
