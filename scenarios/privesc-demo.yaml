@@ -7,7 +7,7 @@ level: beginner
 category: pwning
 
 environment:
-  image: "flexipwn/vulnerable-sudo:latest"
+  image: "vuln-sudo-privesc"
   attacker_image: "flexipwn-attacker"
   log_paths: []
   ports: []
