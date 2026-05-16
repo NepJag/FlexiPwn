@@ -12,10 +12,11 @@ dependencies = [
     "sqlmodel>=0.0.14",
     "bcrypt>=4.0",
     "watchdog>=6.0",
+    "prompt_toolkit>=3.0",
 ]
 
 [project.scripts]
-flexipwn = "flexipwn.cli.main:app"
+flexipwn = "flexipwn.layer4.cli.main:app"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-mock>=3.0"]

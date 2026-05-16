@@ -5,7 +5,9 @@ RUN apt-get update && apt-get install -y \
     netcat-openbsd \
     curl \
     nmap \
-    && rm -rf /var/lib/apt/lists/*
+    sudo \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "%sudo ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 RUN useradd -m -s /bin/bash attacker && \
     echo "attacker:attacker" | chpasswd
 RUN mkdir -p /var/run/sshd && \

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from docker.errors import APIError, NotFound
 
@@ -103,7 +103,7 @@ class FilesystemMonitor:
     def _emit_event(self, kind: int, path: str) -> None:
         event_type = _KIND_TO_EVENT_TYPE.get(kind, "file_modified")
         event = MonitorEvent(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             monitor_type="filesystem",
             event_type=event_type,
             env_id=self._env_id,

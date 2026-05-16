@@ -1,7 +1,7 @@
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pydantic import BaseModel
 
@@ -185,7 +185,7 @@ class EvaluationEngine:
                 state.matched = not state.children[0].matched
 
             if state.matched and not old_matched:
-                state.matched_at = datetime.now(timezone.utc)
+                state.matched_at = datetime.now(UTC)
                 matched_children = [c for c in state.children if c.matched]
                 if matched_children:
                     state.trigger_event = matched_children[-1].trigger_event

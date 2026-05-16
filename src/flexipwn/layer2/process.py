@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from flexipwn.layer1.provider import EnvironmentProvider, ProcessInfo
 from flexipwn.layer2.events import MonitorEvent
@@ -86,7 +86,7 @@ class ProcessMonitor:
 
     def _emit_event(self, process: ProcessInfo) -> None:
         event = MonitorEvent(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             monitor_type="process",
             event_type="process_spawned",
             env_id=self._env_id,

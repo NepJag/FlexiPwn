@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from flexipwn.core.super_monitor import SuperMonitor
+from flexipwn.layer4.core.super_monitor import SuperMonitor
 
 
 def _now() -> datetime:
@@ -160,3 +160,27 @@ class TestSuperMonitorPolling:
             assert env_id not in sm._slots
 
         sm.stop()
+
+    def test_no_datetime_crash_with_naive_started_at(self):
+        """Regression: started_at naive (DB legacy) no debe romper el _loop con
+        TypeError("can't subtract offset-naive and offset-aware datetimes")."""
+        sm = SuperMonitor(poll_interval=0.05, max_workers=2)
+        sm.start()
+
+        orc = _CountingOrchestrator()
+        # Naive UTC (lo que SQLite devolvía antes del fix de columnas)
+        naive_started = datetime.utcnow()  # noqa: DTZ003 — intencionalmente naive
+        sm.add_environment(
+            env_id="run-naive001",
+            orchestrator=orc,
+            run_id=uuid.uuid4(),
+            started_at=naive_started,
+            timeout_seconds=3600,
+        )
+
+        time.sleep(0.25)  # debe sobrevivir varios ciclos sin crashear el thread
+        sm.stop()
+
+        # Confirma que el slot quedó normalizado a aware (no se removió por
+        # excepción y los polls efectivamente corrieron).
+        assert orc.poll_count >= 1

@@ -9,7 +9,7 @@ category: web
 
 environment:
   image: "vuln-sqli-mysql"
-  attacker_image: "flexipwn-attacker-web"
+  attacker_image: "flexipwn-attacker"
   log_paths:
     - "/var/log/mysql/general.log"
     - "/var/log/app/app.log"

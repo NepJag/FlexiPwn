@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -140,6 +141,33 @@ class DockerRootlessProvider(EnvironmentProvider):
 
     def _volume_base(self, env_id: str) -> Path:
         return Path(self.config.volumes_base_path) / env_id
+
+    def _state_dir(self, env_id: str) -> Path:
+        return Path.home() / ".flexipwn" / "state" / env_id
+
+    def _baseline_path(self, env_id: str) -> Path:
+        return self._state_dir(env_id) / "baseline.json"
+
+    def _persist_baseline(self, env_id: str) -> None:
+        state = self._state_dir(env_id)
+        state.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "baseline": sorted(self._baselines.get(env_id, set())),
+            "strategy": self._baseline_strategies.get(env_id, "unknown"),
+        }
+        self._baseline_path(env_id).write_text(json.dumps(payload))
+
+    def _load_baseline(self, env_id: str) -> bool:
+        path = self._baseline_path(env_id)
+        if not path.exists():
+            return False
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        self._baselines[env_id] = set(payload.get("baseline", []))
+        self._baseline_strategies[env_id] = payload.get("strategy", "unknown")
+        return True
 
     def _container_name(self, env_id: str, role: str) -> str:
         return f"flexipwn-{env_id}-{role}"
@@ -438,6 +466,7 @@ class DockerRootlessProvider(EnvironmentProvider):
             baseline_diff = vuln_container.diff() or []
             self._baselines[env_id] = {item["Path"] for item in baseline_diff}
             self._baseline_strategies[env_id] = baseline_strategy
+            self._persist_baseline(env_id)
 
             if enable_network_capture:
                 self._create_sniffer(env_id, capture_filter=capture_filter)
@@ -537,6 +566,58 @@ class DockerRootlessProvider(EnvironmentProvider):
         vol_base = self._volume_base(env_id)
         if vol_base.exists():
             shutil.rmtree(vol_base)
+
+        # Estado persistido (baseline)
+        state = self._state_dir(env_id)
+        if state.exists():
+            shutil.rmtree(state, ignore_errors=True)
+
+    def attach_existing(self, env_id: str) -> Environment:
+        """Reconstruye el estado interno para un entorno ya creado en Docker.
+
+        Útil para que el daemon retome el monitoreo de runs que la CLI
+        creó en un proceso distinto. Carga el baseline desde disco si está
+        presente; si no, reinicia con baseline vacío (el daemon registrará
+        cualquier diff actual como cambio del estudiante).
+        """
+        vuln_name = self._container_name(env_id, "vulnerable")
+        try:
+            vuln = self.client.containers.get(vuln_name)
+        except NotFound:
+            raise EnvironmentNotFoundError(
+                f"Contenedor vulnerable '{vuln_name}' no existe en Docker."
+            )
+
+        labels = vuln.labels or {}
+        scenario_id = labels.get(LABEL_SCENARIO_ID, "")
+        participant_id = labels.get(LABEL_PARTICIPANT_ID, "")
+
+        attacker_name: str | None = None
+        try:
+            self.client.containers.get(self._container_name(env_id, "attacker"))
+            attacker_name = self._container_name(env_id, "attacker")
+        except NotFound:
+            pass
+
+        if not self._load_baseline(env_id):
+            self._baselines[env_id] = set()
+            self._baseline_strategies[env_id] = "unknown"
+
+        vol_base = self._volume_base(env_id)
+
+        return Environment(
+            env_id=env_id,
+            scenario_id=scenario_id,
+            participant_id=participant_id,
+            container_vulnerable_name=vuln_name,
+            container_attacker_name=attacker_name,
+            network_name=self._network_name(env_id),
+            status="running",
+            created_at=datetime.now(timezone.utc),
+            volume_base_path=str(vol_base),
+            volume_mappings={},
+            baseline_strategy=self._baseline_strategies.get(env_id, "unknown"),
+        )
 
     def reset(self, env_id: str) -> None:
         self._baselines.pop(env_id, None)
@@ -687,6 +768,13 @@ class DockerRootlessProvider(EnvironmentProvider):
         try:
             diff = c.diff()
         except APIError as exc:
+            # Race con destroy/reset: el contenedor existe pero ya no corre.
+            # Tratarlo como "entorno desaparecido" para que el monitor pare
+            # limpiamente sin traceback ruidoso.
+            if "is not running" in str(exc).lower():
+                raise EnvironmentNotFoundError(
+                    f"Contenedor '{c.name}' detenido durante diff (env_id={env_id})."
+                ) from exc
             raise ProviderError(f"Error obteniendo diff del filesystem: {exc}")
         if diff is None:
             return []
@@ -710,6 +798,11 @@ class DockerRootlessProvider(EnvironmentProvider):
             # Segunda llamada: PID + euid + ppid + cmd (cmd absorbe el resto)
             top_info = c.top(ps_args="-o pid,euid,ppid,cmd")
         except APIError as exc:
+            # Race con destroy/reset: idem get_filesystem_diff.
+            if "is not running" in str(exc).lower():
+                raise EnvironmentNotFoundError(
+                    f"Contenedor '{c.name}' detenido durante top (env_id={env_id})."
+                ) from exc
             raise ProviderError(f"Error obteniendo procesos: {exc}")
 
         # Parsear lstart: cada fila = [pid, DiaSem, Mes, Dia, HH:MM:SS, Año]

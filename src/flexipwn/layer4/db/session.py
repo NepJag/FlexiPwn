@@ -7,7 +7,7 @@ from pathlib import Path
 
 from sqlmodel import Session, SQLModel, create_engine, text
 
-from flexipwn.db import models as _models  # noqa: F401 — registers SQLModel tables
+from flexipwn.layer4.db import models as _models  # noqa: F401 — registers SQLModel tables
 
 
 def _resolve_db_path(db_path: str | None = None) -> str:
@@ -25,12 +25,16 @@ _engine = None
 
 
 def get_engine(db_path: str | None = None):
-    global _engine
+    global _engine, _engine_path
     if _engine is None:
         resolved = _resolve_db_path(db_path)
         Path(resolved).parent.mkdir(parents=True, exist_ok=True)
         _engine = create_engine(f"sqlite:///{resolved}", echo=False)
+        _engine_path = resolved
     return _engine
+
+
+_engine_path: str | None = None
 
 
 def init_db(engine=None) -> None:
@@ -43,6 +47,11 @@ def init_db(engine=None) -> None:
             "ON exerciserun(scenario_id, participant_id) WHERE status = 'running'"
         ))
         conn.commit()
+    if _engine_path and Path(_engine_path).exists():
+        try:
+            os.chmod(_engine_path, 0o600)
+        except OSError:
+            pass
 
 
 @contextmanager

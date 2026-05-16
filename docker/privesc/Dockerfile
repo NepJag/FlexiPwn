@@ -1,28 +1,31 @@
 FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Instalar sudo y herramientas básicas
+# Herramientas + sshd para que el atacante pueda entrar por SSH
 RUN apt-get update && apt-get install -y \
     sudo \
     vim \
     nano \
+    openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
-# Crear usuario vulnerable
+# Usuario vulnerable + clave conocida (educativo)
 RUN useradd -m -s /bin/bash ctfuser && \
     echo "ctfuser:ctfpassword" | chpasswd
 
-# VULNERABILIDAD: sudo mal configurado
-# Permite ejecutar vim como root sin password
+# VULNERABILIDAD: sudo mal configurado — vim como root sin password
 RUN echo "ctfuser ALL=(ALL) NOPASSWD: /usr/bin/vim" >> /etc/sudoers
 
-# Crear directorio compartido para monitoreo
+# sshd: directorio runtime + permitir password auth
+RUN mkdir -p /var/run/sshd && \
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+# Directorio observado por el monitor de filesystem
 RUN mkdir -p /monitored && chmod 755 /monitored
 
-# Cambiar al usuario vulnerable
-USER ctfuser
-WORKDIR /home/ctfuser
+EXPOSE 22
 
-HEALTHCHECK --interval=2s --timeout=2s --start-period=3s --retries=3 \
-      CMD id ctfuser
+HEALTHCHECK --interval=2s --timeout=2s --start-period=5s --retries=5 \
+    CMD pgrep sshd || exit 1
 
-CMD ["/bin/bash"]
+CMD ["/usr/sbin/sshd", "-D"]

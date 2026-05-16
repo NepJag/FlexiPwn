@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from flexipwn.layer2.events import MonitorEvent
@@ -121,7 +121,7 @@ class NetworkMonitor:
 
     def _emit_event(self, event_type: str, details: dict) -> None:
         event = MonitorEvent(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             monitor_type="network",
             event_type=event_type,
             env_id=self._env_id,

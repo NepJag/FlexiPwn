@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import bcrypt
 from sqlmodel import Session, select
 
-from flexipwn.db.models import (
+from flexipwn.layer4.db.models import (
     ExerciseRun,
     Participant,
     RunEvent,
@@ -22,7 +22,7 @@ from flexipwn.layer3.schema import ScenarioConfig, load_scenario
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -117,12 +117,14 @@ def create_run(
     scenario_id: uuid.UUID,
     participant_id: uuid.UUID,
     env_id: str,
+    attacker_ssh_port: int | None = None,
 ) -> ExerciseRun:
     run = ExerciseRun(
         scenario_id=scenario_id,
         participant_id=participant_id,
         env_id=env_id,
         status="pending",
+        attacker_ssh_port=attacker_ssh_port,
     )
     session.add(run)
     session.commit()
@@ -130,16 +132,144 @@ def create_run(
     return run
 
 
-def mark_run_started(session: Session, run_id: uuid.UUID) -> ExerciseRun:
+def mark_run_started(
+    session: Session,
+    run_id: uuid.UUID,
+    attacker_ssh_port: int | None = None,
+) -> ExerciseRun:
     run = session.get(ExerciseRun, run_id)
     if run is None:
         raise ValueError(f"Run no encontrado: {run_id}")
     run.status = "running"
     run.started_at = _now()
+    if attacker_ssh_port is not None:
+        run.attacker_ssh_port = attacker_ssh_port
     session.add(run)
     session.commit()
     session.refresh(run)
     return run
+
+
+def set_run_status(
+    session: Session,
+    run_id: uuid.UUID,
+    status: str,
+    message: str | None = None,
+) -> ExerciseRun:
+    run = session.get(ExerciseRun, run_id)
+    if run is None:
+        raise ValueError(f"Run no encontrado: {run_id}")
+    run.status = status
+    if message is not None:
+        run.daemon_message = message
+    if status in ("completed", "failed", "timeout", "stopped") and run.finished_at is None:
+        run.finished_at = _now()
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def set_attacker_ssh_credentials(
+    session: Session,
+    run_id: uuid.UUID,
+    username: str,
+    password: str,
+    port: int,
+) -> ExerciseRun:
+    run = session.get(ExerciseRun, run_id)
+    if run is None:
+        raise ValueError(f"Run no encontrado: {run_id}")
+    run.attacker_ssh_username = username
+    run.attacker_ssh_password = password
+    run.attacker_ssh_port = port
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def set_reset_payload(session: Session, run_id: uuid.UUID, payload_json: str) -> None:
+    run = session.get(ExerciseRun, run_id)
+    if run is None:
+        raise ValueError(f"Run no encontrado: {run_id}")
+    run.reset_payload = payload_json
+    session.add(run)
+    session.commit()
+
+
+def clear_reset_payload(session: Session, run_id: uuid.UUID) -> None:
+    run = session.get(ExerciseRun, run_id)
+    if run is None:
+        return
+    run.reset_payload = None
+    session.add(run)
+    session.commit()
+
+
+def get_runs_needing_action(session: Session) -> list[ExerciseRun]:
+    """Runs en estados que el daemon debe procesar."""
+    return list(
+        session.exec(
+            select(ExerciseRun).where(
+                ExerciseRun.status.in_(("running", "stopping", "resetting"))  # type: ignore[attr-defined]
+            )
+        ).all()
+    )
+
+
+def list_runs_with_context(
+    session: Session,
+    scenario_id: uuid.UUID | None = None,
+    participant_id: uuid.UUID | None = None,
+) -> list[dict]:
+    stmt = (
+        select(ExerciseRun, Scenario, Participant)
+        .join(Scenario, Scenario.id == ExerciseRun.scenario_id)
+        .join(Participant, Participant.id == ExerciseRun.participant_id)
+    )
+    if scenario_id is not None:
+        stmt = stmt.where(ExerciseRun.scenario_id == scenario_id)
+    if participant_id is not None:
+        stmt = stmt.where(ExerciseRun.participant_id == participant_id)
+    rows = list(session.exec(stmt).all())
+    out: list[dict] = []
+    for run, scenario, participant in rows:
+        out.append(
+            {
+                "env_id": run.env_id,
+                "scenario_title": scenario.title,
+                "participant_username": participant.username,
+                "status": run.status,
+                "progress": run.progress,
+                "started_at": run.started_at,
+                "attacker_ssh_port": run.attacker_ssh_port,
+                "run_id": run.id,
+            }
+        )
+    return out
+
+
+def get_active_runs_by_participant(
+    session: Session, participant_id: uuid.UUID
+) -> list[ExerciseRun]:
+    return list(
+        session.exec(
+            select(ExerciseRun)
+            .where(ExerciseRun.participant_id == participant_id)
+            .where(
+                ExerciseRun.status.in_(("pending", "running", "stopping", "resetting"))  # type: ignore[attr-defined]
+            )
+        ).all()
+    )
+
+
+def delete_participant(session: Session, participant_id: uuid.UUID) -> None:
+    participant = session.get(Participant, participant_id)
+    if participant is None:
+        return
+    session.delete(participant)
+    session.commit()
 
 
 def mark_run_finished(session: Session, run_id: uuid.UUID, status: str) -> ExerciseRun:
@@ -252,6 +382,23 @@ def mark_targets_reset(session: Session, run_id: uuid.UUID) -> None:
 
 def get_target_results(session: Session, run_id: uuid.UUID) -> list[TargetResult]:
     return list(session.exec(select(TargetResult).where(TargetResult.run_id == run_id)).all())
+
+
+def get_target_results_by_run(session: Session, run_id: uuid.UUID) -> list[TargetResult]:
+    """TargetResults del run, ordenados por reset_at ascendente con NULLs al final."""
+    rows = list(
+        session.exec(
+            select(TargetResult).where(TargetResult.run_id == run_id)
+        ).all()
+    )
+    return sorted(
+        rows,
+        key=lambda r: (
+            r.reset_at is None,
+            r.reset_at if r.reset_at is not None else datetime.max.replace(tzinfo=UTC),
+            r.target_index,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

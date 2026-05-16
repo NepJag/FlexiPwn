@@ -1,4 +1,9 @@
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
+
+
+def _default_host() -> str:
+    return os.environ.get("FLEXIPWN_HOST", "localhost")
 
 
 @dataclass
@@ -12,3 +17,6 @@ class FlexiPwnConfig:
     db_path: str | None = None  # None → ~/.flexipwn/flexipwn.db o FLEXIPWN_DB_PATH
     super_monitor_max_workers: int = 16
     super_monitor_poll_interval: float = 2.0
+    host: str = field(default_factory=_default_host)
+    attacker_port_range_start: int = 2200
+    attacker_port_range_end: int = 2299

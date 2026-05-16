@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from flexipwn.layer2.events import MonitorEvent
@@ -112,7 +112,7 @@ class LogMonitor:
             details = {"source_file": source_file, "raw_line": line}
 
         event = MonitorEvent(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             monitor_type="log",
             event_type="log_entry",
             env_id=self._env_id,

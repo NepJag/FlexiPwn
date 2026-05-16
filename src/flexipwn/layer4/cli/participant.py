@@ -5,8 +5,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from flexipwn.db import repository
-from flexipwn.db.session import get_session
+from flexipwn.layer4.db import repository
+from flexipwn.layer4.db.session import get_session
 
 app = typer.Typer(help="Gestión de participantes")
 console = Console()
@@ -66,3 +66,34 @@ def participant_reset_password(
         title="Reset de contraseña",
         border_style="yellow",
     ))
+
+
+@app.command("remove")
+def participant_remove(
+    username: str = typer.Argument(..., help="Username del participante"),
+) -> None:
+    """Elimina un participante. Bloqueado si tiene runs activos."""
+    with get_session() as session:
+        participant = repository.get_participant_by_username(session, username)
+        if participant is None:
+            console.print(f"[red]Participante no encontrado:[/red] {username!r}")
+            raise typer.Exit(1)
+        active = repository.get_active_runs_by_participant(session, participant.id)
+        if active:
+            env_ids = ", ".join(r.env_id for r in active)
+            console.print(
+                f"[red]El participante {username!r} tiene runs activos:[/red] {env_ids}\n"
+                f"Detén los runs con [yellow]flexipwn run stop <env_id>[/yellow] "
+                f"antes de eliminar el participante."
+            )
+            raise typer.Exit(1)
+        participant_id = participant.id
+
+    if not typer.confirm(f"¿Eliminar participante {username}?"):
+        console.print("[dim]Cancelado.[/dim]")
+        raise typer.Exit(0)
+
+    with get_session() as session:
+        repository.delete_participant(session, participant_id)
+
+    console.print(f"[green]Participante {username} eliminado.[/green]")

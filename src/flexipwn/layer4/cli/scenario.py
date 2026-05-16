@@ -7,8 +7,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from flexipwn.db import repository
-from flexipwn.db.session import get_session
+from flexipwn.layer4.db import repository
+from flexipwn.layer4.db.session import get_session
 from flexipwn.layer3.schema import load_scenario
 
 app = typer.Typer(help="Gestión de escenarios")
