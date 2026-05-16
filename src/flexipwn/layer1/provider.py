@@ -62,18 +62,19 @@ class ProcessInfo:
     euid: int
     ppid: str
     cmd: str
-    lstart: str       # tiempo de inicio: "Mon Oct 23 10:25:44 2023"
-    process_id: str   # sha256[:12] de "{pid}:{lstart}" — identifica unívocamente
-                      # el proceso aunque el PID se reutilice
+    lstart: str              # "Mon Oct 23 10:25:44 2023" — desde dos llamadas a top()
+    process_id: str          # sha256[:12] de "{pid}:{lstart}" o "{pid}:{cmd}"
+    ppid_cmd: str            # comando del proceso padre directo
+    ancestor_cmds: list[str] # cadena de comandos [padre, abuelo, ...] más cercano primero
 
 
-def make_process_id(pid: str, disambiguator: str) -> str:
-    """Hash sha256[:12] de '{pid}:{disambiguator}'.
+def make_process_id(pid: str, lstart: str) -> str:
+    """Hash sha256[:12] de '{pid}:{lstart}'.
 
-    disambiguator es cualquier string que distinga al proceso aunque su PID se reutilice.
-    En la práctica se usa 'ppid:cmd' ya que container.top() no expone lstart sin overflow.
+    lstart es el timestamp de inicio del proceso (o cmd cuando lstart no está disponible).
+    Identifica unívocamente el proceso aunque el PID se reutilice.
     """
-    raw = f"{pid}:{disambiguator}"
+    raw = f"{pid}:{lstart}"
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 

@@ -24,14 +24,19 @@ def _make_process(
     ppid: str = "1",
     cmd: str = "/bin/bash",
     lstart: str = "",
+    ppid_cmd: str = "",
+    ancestor_cmds: list | None = None,
 ) -> ProcessInfo:
+    process_id = make_process_id(pid, lstart) if lstart else make_process_id(pid, cmd)
     return ProcessInfo(
         pid=pid,
         euid=euid,
         ppid=ppid,
         cmd=cmd,
         lstart=lstart,
-        process_id=make_process_id(pid, f"{ppid}:{cmd}"),
+        process_id=process_id,
+        ppid_cmd=ppid_cmd,
+        ancestor_cmds=ancestor_cmds or [],
     )
 
 
@@ -59,6 +64,8 @@ def _make_process_spawned_event(
     euid: int = 0,
     cmd: str = "/bin/bash -i",
     ppid: str = "1",
+    ppid_cmd: str = "",
+    ancestor_cmds: list | None = None,
 ) -> MonitorEvent:
     return MonitorEvent(
         timestamp=datetime.now(timezone.utc),
@@ -73,7 +80,9 @@ def _make_process_spawned_event(
             "ppid": ppid,
             "cmd": cmd,
             "lstart": "",
-            "process_id": make_process_id("999", f"{ppid}:{cmd}"),
+            "process_id": make_process_id("999", cmd),
+            "ppid_cmd": ppid_cmd,
+            "ancestor_cmds": ancestor_cmds or [],
         },
     )
 
@@ -128,7 +137,7 @@ class TestProcessMonitorBaseline:
     def test_process_id_collision_prevention(self):
         """
         Reutilización de PID: proceso pid=123 (bash) desaparece y aparece otro
-        con mismo pid=123 pero distinto cmd → process_ids distintos (hash pid:ppid:cmd)
+        con mismo pid=123 pero distinto cmd → process_ids distintos (hash pid:cmd)
         → segundo proceso SÍ emite evento.
         """
         proc_a = _make_process(pid="123", ppid="1", cmd="/bin/bash")
@@ -158,6 +167,8 @@ class TestProcessMonitorBaseline:
             euid=1000,
             ppid="1",
             cmd="/usr/bin/python3 script.py",
+            ppid_cmd="bash",
+            ancestor_cmds=["bash", "init"],
         )
         monitor, on_event = _make_monitor(
             processes_sequence=[base_procs, base_procs + [new_proc]]
@@ -172,8 +183,9 @@ class TestProcessMonitorBaseline:
         assert details["euid"] == 1000
         assert details["ppid"] == "1"
         assert details["cmd"] == "/usr/bin/python3 script.py"
-        assert details["lstart"] == ""  # no disponible vía container.top()
         assert len(details["process_id"]) == 12
+        assert details["ppid_cmd"] == "bash"
+        assert details["ancestor_cmds"] == ["bash", "init"]
 
 
 class TestProcessMonitorStopped:
@@ -226,12 +238,20 @@ class TestProcessMonitorStopped:
 
 class TestProcessRunningEvaluator:
 
-    def _make_evaluator(self, euid: int = 0, cmd_contains: str = "/bin/bash") -> ProcessRunningEvaluator:
+    def _make_evaluator(
+        self,
+        euid: int = 0,
+        cmd_contains: str = "/bin/bash",
+        ppid_cmd_contains: str | None = None,
+        ancestor_contains: str | None = None,
+    ) -> ProcessRunningEvaluator:
         config = TargetConfig(
             type="process_running",
             description="test",
             euid=euid,
             cmd_contains=cmd_contains,
+            ppid_cmd_contains=ppid_cmd_contains,
+            ancestor_contains=ancestor_contains,
         )
         return ProcessRunningEvaluator(config)
 
@@ -277,6 +297,84 @@ class TestProcessRunningEvaluator:
         event = _make_process_spawned_event(euid=0, cmd="/usr/bin/bash --noprofile")
 
         assert evaluator.matches(event) is True
+
+    def test_process_running_ppid_filter_blocks_sudo_bash(self):
+        """
+        sudo bash directo: padre es 'bash' o 'sudo', no vim.
+        Con ppid_cmd_contains='vim' → no match.
+        """
+        evaluator = self._make_evaluator(
+            euid=0, cmd_contains="bash", ppid_cmd_contains="vim"
+        )
+        event = _make_process_spawned_event(
+            euid=0, cmd="bash", ppid_cmd="bash"
+        )
+
+        assert evaluator.matches(event) is False
+
+    def test_process_running_ppid_filter_allows_vim_bash(self):
+        """
+        sudo vim → :!bash: padre es vim.
+        Con ppid_cmd_contains='vim' → match.
+        """
+        evaluator = self._make_evaluator(
+            euid=0, cmd_contains="bash", ppid_cmd_contains="vim"
+        )
+        event = _make_process_spawned_event(
+            euid=0, cmd="bash", ppid_cmd="vim /etc/hosts"
+        )
+
+        assert evaluator.matches(event) is True
+
+    def test_process_running_ancestor_filter(self):
+        """
+        ancestor_cmds contiene 'sudo' en la cadena → match con ancestor_contains='sudo'.
+        """
+        evaluator = self._make_evaluator(
+            euid=0, cmd_contains="bash", ancestor_contains="sudo"
+        )
+        event = _make_process_spawned_event(
+            euid=0,
+            cmd="bash",
+            ancestor_cmds=["vim /etc/hosts", "sudo vim", "bash"],
+        )
+
+        assert evaluator.matches(event) is True
+
+    def test_process_running_no_ancestor_match(self):
+        """
+        ancestor_cmds no contiene 'vim' → no match con ancestor_contains='vim'.
+        """
+        evaluator = self._make_evaluator(
+            euid=0, cmd_contains="bash", ancestor_contains="vim"
+        )
+        event = _make_process_spawned_event(
+            euid=0,
+            cmd="bash",
+            ancestor_cmds=["bash", "init"],
+        )
+
+        assert evaluator.matches(event) is False
+
+    def test_ppid_and_ancestor_both_required(self):
+        """
+        Ambos filtros opcionales activos: ppid OK pero ancestor falla → no match.
+        """
+        evaluator = self._make_evaluator(
+            euid=0,
+            cmd_contains="bash",
+            ppid_cmd_contains="vim",
+            ancestor_contains="sudo",
+        )
+        # ppid_cmd contiene 'vim' pero ancestor_cmds no contiene 'sudo'
+        event = _make_process_spawned_event(
+            euid=0,
+            cmd="bash",
+            ppid_cmd="vim",
+            ancestor_cmds=["bash"],
+        )
+
+        assert evaluator.matches(event) is False
 
 
 # ---------------------------------------------------------------------------

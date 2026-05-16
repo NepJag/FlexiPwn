@@ -1,5 +1,6 @@
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from pydantic import BaseModel
@@ -11,12 +12,16 @@ from flexipwn.layer3.targets.registry import get_evaluator
 
 
 class TargetResult(BaseModel):
-    target_index: int          # posición en la lista targets del YAML
+    target_index: int
     target_type: str
     description: str
     matched: bool = False
     matched_at: datetime | None = None
     trigger_event: MonitorEvent | None = None
+    children: list["TargetResult"] | None = None  # poblado para nodos lógicos
+
+
+TargetResult.model_rebuild()
 
 
 class EvaluationResult(BaseModel):
@@ -27,10 +32,21 @@ class EvaluationResult(BaseModel):
     targets: list[TargetResult]
     completed: bool
     completed_at: datetime | None = None
-    progress: float            # matched / total
+    progress: float            # hojas matcheadas / total hojas
 
 
 EvaluationCallback = Callable[[EvaluationResult], None]
+
+
+@dataclass
+class TargetState:
+    index: int
+    config: TargetConfig
+    matched: bool = False
+    matched_at: datetime | None = None
+    trigger_event: MonitorEvent | None = None
+    children: list["TargetState"] | None = None  # None para hojas
+    evaluator: TargetEvaluator | None = None      # None para nodos lógicos
 
 
 class EvaluationEngine:
@@ -38,7 +54,9 @@ class EvaluationEngine:
     Recibe MonitorEvents y evalúa las condiciones de éxito del escenario.
 
     Principios:
-    - Una vez que un target se marca como matched, no vuelve a False.
+    - Hojas: una vez matched=True, no vuelve a False.
+    - Nodos lógicos (and/or/not): se recalculan en cada cambio.
+      El nodo 'not' empieza como matched=True y puede revertir a False.
     - El callback on_update se invoca SOLO cuando hay un cambio de estado.
     - Engine no accede a Docker ni al filesystem — es pura lógica.
     - Thread-safe: el estado interno está protegido por un Lock.
@@ -58,10 +76,7 @@ class EvaluationEngine:
         self._env_id = env_id
         self._on_update = on_update
         self._lock = threading.Lock()
-        self._evaluators: list[TargetEvaluator] = [
-            get_evaluator(t) for t in scenario.targets
-        ]
-        self._results: list[TargetResult] = self._build_initial_results()
+        self._states: list[TargetState] = self._init_states(scenario.targets)
 
     # ------------------------------------------------------------------
     # Interfaz pública
@@ -69,87 +84,212 @@ class EvaluationEngine:
 
     def process_event(self, event: MonitorEvent) -> None:
         """
-        Procesa un evento. Si algún target nuevo matchea, actualiza el estado
-        interno y llama a on_update con el EvaluationResult actualizado.
-        Si ningún target cambia, no llama al callback.
+        Procesa un evento. Si algún target nuevo matchea (o un nodo lógico
+        cambia de estado), actualiza el estado interno y llama a on_update.
+        Si ningún estado cambia, no llama al callback.
         """
-        changed = False
+        snapshot = None
         with self._lock:
-            for i, (evaluator, result) in enumerate(
-                zip(self._evaluators, self._results)
-            ):
-                if result.matched:
-                    continue  # los logros no se revierten
-                if evaluator.matches(event):
-                    self._results[i] = result.model_copy(update={
-                        "matched": True,
-                        "matched_at": datetime.now(tz=timezone.utc),
-                        "trigger_event": event,
-                    })
-                    changed = True
-
+            changed = self._evaluate_leaves(self._states, event)
             if changed:
+                self._propagate_logical_nodes(self._states)
                 snapshot = self._build_result()
 
-        if changed:
+        if snapshot is not None:
             self._on_update(snapshot)
 
     def current_result(self) -> EvaluationResult:
-        """Retorna el estado actual sin modificarlo."""
         with self._lock:
             return self._build_result()
 
     def reset(self) -> None:
-        """Reinicia todos los targets a matched=False. Para uso en reset del run."""
         with self._lock:
-            self._results = self._build_initial_results()
+            self._reset_states(self._states)
 
     # ------------------------------------------------------------------
-    # Métodos internos
+    # Inicialización del árbol
     # ------------------------------------------------------------------
 
-    def _evaluate_condition(self) -> bool:
-        """Evalúa any/all sobre el conjunto actual de targets matcheados."""
-        matched_flags = [r.matched for r in self._results]
-        if self._scenario.condition == "any":
-            return any(matched_flags)
-        return all(matched_flags)
+    def _init_states(self, targets: list[TargetConfig]) -> list[TargetState]:
+        states = []
+        for i, target in enumerate(targets):
+            if target.type in ("and", "or", "not"):
+                children = self._init_states(target.targets or [])
+                # Calcular estado inicial del nodo lógico.
+                # 'not' empieza como True porque su hijo aún no ha matcheado.
+                if target.type == "and":
+                    initial = all(c.matched for c in children)
+                elif target.type == "or":
+                    initial = any(c.matched for c in children)
+                else:  # "not"
+                    initial = not children[0].matched
+                states.append(TargetState(
+                    index=i,
+                    config=target,
+                    matched=initial,
+                    children=children,
+                    evaluator=None,
+                ))
+            else:
+                states.append(TargetState(
+                    index=i,
+                    config=target,
+                    children=None,
+                    evaluator=get_evaluator(target),
+                ))
+        return states
 
-    def _calculate_progress(self) -> float:
-        """len(matched) / len(total_targets)"""
-        total = len(self._results)
-        if total == 0:
-            return 0.0
-        matched = sum(1 for r in self._results if r.matched)
-        return matched / total
+    # ------------------------------------------------------------------
+    # Evaluación de hojas
+    # ------------------------------------------------------------------
 
-    def _build_initial_results(self) -> list[TargetResult]:
-        return [
-            TargetResult(
-                target_index=i,
-                target_type=target.type,
-                description=target.description,
-            )
-            for i, target in enumerate(self._scenario.targets)
-        ]
+    def _evaluate_leaves(
+        self, states: list[TargetState], event: MonitorEvent
+    ) -> bool:
+        """Evalúa todos los nodos hoja. Retorna True si algo cambió."""
+        changed = False
+        for state in states:
+            if state.children is not None:
+                if self._evaluate_leaves(state.children, event):
+                    changed = True
+            else:
+                if not state.matched and state.evaluator is not None:
+                    if state.evaluator.matches(event):
+                        state.matched = True
+                        state.matched_at = event.timestamp
+                        state.trigger_event = event
+                        changed = True
+        return changed
+
+    # ------------------------------------------------------------------
+    # Propagación de nodos lógicos
+    # ------------------------------------------------------------------
+
+    def _propagate_logical_nodes(self, states: list[TargetState]) -> None:
+        """
+        Recalcula el estado de los nodos lógicos de abajo hacia arriba.
+        Debe llamarse después de _evaluate_leaves.
+        """
+        for state in states:
+            if state.children is None:
+                continue
+            # Propagar hijos primero (bottom-up)
+            self._propagate_logical_nodes(state.children)
+
+            old_matched = state.matched
+            if state.config.type == "and":
+                state.matched = all(c.matched for c in state.children)
+            elif state.config.type == "or":
+                state.matched = any(c.matched for c in state.children)
+            elif state.config.type == "not":
+                state.matched = not state.children[0].matched
+
+            if state.matched and not old_matched:
+                state.matched_at = datetime.now(timezone.utc)
+                matched_children = [c for c in state.children if c.matched]
+                if matched_children:
+                    state.trigger_event = matched_children[-1].trigger_event
+
+    # ------------------------------------------------------------------
+    # Construcción de resultados
+    # ------------------------------------------------------------------
 
     def _build_result(self) -> EvaluationResult:
-        """Construye un EvaluationResult desde el estado actual (debe llamarse con lock)."""
-        completed = self._evaluate_condition()
-        progress = self._calculate_progress()
+        targets = self._build_target_results(self._states)
+
+        if self._scenario.condition == "any":
+            completed = any(s.matched for s in self._states)
+        else:
+            completed = all(s.matched for s in self._states)
+
+        total_leaves = self._count_leaves(self._states)
+        matched_leaves = self._count_matched_leaves(self._states)
+        progress = matched_leaves / total_leaves if total_leaves > 0 else 0.0
+
         completed_at: datetime | None = None
         if completed:
-            # Usar el matched_at más reciente del target que cerró la condición
-            matched_times = [r.matched_at for r in self._results if r.matched_at]
-            if matched_times:
-                completed_at = max(matched_times)
+            times = self._collect_matched_times(self._states)
+            if times:
+                completed_at = max(times)
+
         return EvaluationResult(
             scenario_id=self._scenario_id,
             participant_id=self._participant_id,
             env_id=self._env_id,
             condition=self._scenario.condition,
-            targets=list(self._results),
+            targets=targets,
             completed=completed,
             completed_at=completed_at,
             progress=progress,
         )
+
+    def _build_target_results(self, states: list[TargetState]) -> list[TargetResult]:
+        results = []
+        for state in states:
+            children = None
+            if state.children is not None:
+                children = self._build_target_results(state.children)
+            results.append(TargetResult(
+                target_index=state.index,
+                target_type=state.config.type,
+                description=state.config.description,
+                matched=state.matched,
+                matched_at=state.matched_at,
+                trigger_event=state.trigger_event,
+                children=children,
+            ))
+        return results
+
+    def _count_leaves(self, states: list[TargetState]) -> int:
+        count = 0
+        for s in states:
+            if s.children is not None:
+                count += self._count_leaves(s.children)
+            else:
+                count += 1
+        return count
+
+    def _count_matched_leaves(self, states: list[TargetState]) -> int:
+        count = 0
+        for s in states:
+            if s.children is not None:
+                count += self._count_matched_leaves(s.children)
+            elif s.matched:
+                count += 1
+        return count
+
+    def _collect_matched_times(self, states: list[TargetState]) -> list[datetime]:
+        times: list[datetime] = []
+        for s in states:
+            if s.matched_at:
+                times.append(s.matched_at)
+            if s.children:
+                times.extend(self._collect_matched_times(s.children))
+        return times
+
+    # ------------------------------------------------------------------
+    # Reset
+    # ------------------------------------------------------------------
+
+    def _reset_states(self, states: list[TargetState]) -> None:
+        for state in states:
+            state.matched = False
+            state.matched_at = None
+            state.trigger_event = None
+            if state.children is not None:
+                self._reset_states(state.children)
+        # Re-inicializar nodos lógicos al estado correcto post-reset
+        # (not nodes deben quedar en True nuevamente)
+        self._reinit_logical_nodes(states)
+
+    def _reinit_logical_nodes(self, states: list[TargetState]) -> None:
+        for state in states:
+            if state.children is None:
+                continue
+            self._reinit_logical_nodes(state.children)
+            if state.config.type == "and":
+                state.matched = all(c.matched for c in state.children)
+            elif state.config.type == "or":
+                state.matched = any(c.matched for c in state.children)
+            elif state.config.type == "not":
+                state.matched = not state.children[0].matched

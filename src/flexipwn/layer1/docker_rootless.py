@@ -37,6 +37,34 @@ def _generate_env_id() -> str:
     return f"run-{uuid.uuid4().hex[:8]}"
 
 
+def _resolve_ancestors(
+    pid: str,
+    by_pid: dict,
+    max_depth: int = 10,
+) -> list[str]:
+    """Recorre el árbol de procesos via PPID y retorna los cmds de los ancestros.
+
+    Retorna lista ordenada del padre más cercano al más lejano.
+    Termina al alcanzar un PID sin entrada, PID 0, o un ciclo.
+    """
+    chain: list[str] = []
+    current_pid = pid
+    visited: set[str] = set()
+    for _ in range(max_depth):
+        current_info = by_pid.get(current_pid)
+        if current_info is None:
+            break
+        parent_pid = current_info.ppid
+        if parent_pid in visited or parent_pid == current_pid:
+            break
+        visited.add(parent_pid)
+        parent = by_pid.get(parent_pid)
+        if parent:
+            chain.append(parent.cmd)
+        current_pid = parent_pid
+    return chain
+
+
 def _detect_socket() -> str:
     """Detecta el socket Docker rootless en orden de prioridad."""
     # 1. DOCKER_HOST
@@ -64,6 +92,11 @@ def _detect_socket() -> str:
     fallback = f"/run/user/{uid}/docker.sock"
     if os.path.exists(fallback):
         return f"unix://{fallback}"
+
+    # macOS Docker Desktop socket
+    mac_socket = Path.home() / ".docker" / "run" / "docker.sock"
+    if mac_socket.exists():
+        return f"unix://{mac_socket}"
 
     raise SocketNotFoundError(
         "No se encontró un socket Docker rootless. "
@@ -170,6 +203,7 @@ class DockerRootlessProvider(EnvironmentProvider):
         image: str,
         attacker_image: str | None = None,
         ports: list[str] | None = None,
+        log_paths: list[str] | None = None,
         timeout_seconds: int = 1800,
         startup_delay: float | None = None,
     ) -> Environment:
@@ -184,11 +218,31 @@ class DockerRootlessProvider(EnvironmentProvider):
         created_vulnerable = False
 
         try:
-            # 1. Directorio base de volúmenes (alojará logs en el futuro)
+            # 1. Directorio base de volúmenes
             vol_base.mkdir(parents=True, exist_ok=True)
             os.chmod(vol_base, 0o700)
             (vol_base / "logs").mkdir(exist_ok=True)
             created_dirs = True
+
+            # 1b. Preparar bind mounts para log_paths
+            # Cada container_log_path se mapea al directorio padre en el host
+            # preservando la ruta completa para evitar colisiones.
+            log_volumes: dict[str, dict] = {}
+            for container_log_path in (log_paths or []):
+                container_dir = str(Path(container_log_path).parent)
+                relative_dir = container_dir.lstrip("/")
+                host_log_dir = vol_base / "logs" / relative_dir
+                host_log_dir.mkdir(parents=True, exist_ok=True)
+                os.chmod(host_log_dir, 0o777)
+                log_volumes[str(host_log_dir)] = {"bind": container_dir, "mode": "rw"}
+
+            # 1c. Parsear ports ["host:container"] → {container_port/tcp: host_port}
+            port_bindings: dict[str, int] = {}
+            for port_spec in (ports or []):
+                parts = port_spec.split(":")
+                if len(parts) == 2:
+                    host_port, container_port = parts
+                    port_bindings[f"{container_port}/tcp"] = int(host_port)
 
             # 2. Red interna
             self.client.networks.create(
@@ -196,7 +250,7 @@ class DockerRootlessProvider(EnvironmentProvider):
             )
             created_network = True
 
-            # 3. Contenedor vulnerable (sin bind mounts de filesystem)
+            # 3. Contenedor vulnerable
             vuln_name = self._container_name(env_id, "vulnerable")
             try:
                 self.client.containers.run(
@@ -207,6 +261,8 @@ class DockerRootlessProvider(EnvironmentProvider):
                     detach=True,
                     stdin_open=True,  # mantiene el contenedor vivo
                     stop_signal="SIGTERM",
+                    volumes=log_volumes if log_volumes else None,
+                    ports=port_bindings if port_bindings else None,
                 )
             except ImageNotFound:
                 raise ImageNotFoundError(f"Imagen '{image}' no encontrada.")
@@ -218,6 +274,7 @@ class DockerRootlessProvider(EnvironmentProvider):
 
             # 4. Contenedor atacante (opcional)
             attacker_name: str | None = None
+            print(attacker_image)
             if attacker_image is not None:
                 attacker_name = self._container_name(env_id, "attacker")
                 try:
@@ -279,6 +336,14 @@ class DockerRootlessProvider(EnvironmentProvider):
             self._baselines[env_id] = {item["Path"] for item in baseline_diff}
             self._baseline_strategies[env_id] = baseline_strategy
 
+            # volume_mappings: container_log_path → host_log_dir (directorio)
+            volume_mappings = {
+                container_log_path: str(
+                    vol_base / "logs" / str(Path(container_log_path).parent).lstrip("/")
+                )
+                for container_log_path in (log_paths or [])
+            }
+
             return Environment(
                 env_id=env_id,
                 scenario_id=scenario_id,
@@ -289,7 +354,7 @@ class DockerRootlessProvider(EnvironmentProvider):
                 status="running",
                 created_at=datetime.now(timezone.utc),
                 volume_base_path=str(vol_base),
-                volume_mappings={},
+                volume_mappings=volume_mappings,
                 baseline_strategy=baseline_strategy,
             )
 
@@ -526,18 +591,29 @@ class DockerRootlessProvider(EnvironmentProvider):
     def get_processes(self, env_id: str) -> list[ProcessInfo]:
         c = self._get_container(env_id, "vulnerable")
         try:
-            # Docker divide cada línea con maxsplit = len(titles) - 1.
-            # Con 4 headers [PID, EUID, PPID, CMD] obtenemos exactamente 4 columnas
-            # y CMD absorbe la línea completa con argumentos incluidos.
-            # No usamos lstart porque causaría overflow: Docker limitaría la fila
-            # a 5 columnas y el último campo mezclaría HH:MM:SS con euid/ppid/cmd.
-            top_result = c.top(ps_args="-o pid,euid,ppid,cmd")
+            # Primera llamada: sólo PID + lstart.
+            # ps devuelve lstart como 5 tokens separados por espacios
+            # (DiaSemana Mes Dia HH:MM:SS Año), que Docker divide en tokens
+            # individuales al hacer split por whitespace. Usar dos llamadas
+            # separadas evita el overflow de columnas que ocurre con una sola
+            # llamada que mezcle lstart con euid/ppid/cmd.
+            top_lstart = c.top(ps_args="-o pid,lstart")
+            # Segunda llamada: PID + euid + ppid + cmd (cmd absorbe el resto)
+            top_info = c.top(ps_args="-o pid,euid,ppid,cmd")
         except APIError as exc:
             raise ProviderError(f"Error obteniendo procesos: {exc}")
 
-        processes: list[ProcessInfo] = []
-        for row in top_result.get("Processes", []):
-            # Esperamos [pid, euid, ppid, cmd_completo]
+        # Parsear lstart: cada fila = [pid, DiaSem, Mes, Dia, HH:MM:SS, Año]
+        lstart_by_pid: dict[str, str] = {}
+        for row in top_lstart.get("Processes", []):
+            if len(row) >= 6:
+                pid = row[0].strip()
+                lstart = " ".join(row[1:6]).strip()
+                lstart_by_pid[pid] = lstart
+
+        # Parsear info: cada fila = [pid, euid, ppid, ...tokens cmd...]
+        processes_by_pid: dict[str, ProcessInfo] = {}
+        for row in top_info.get("Processes", []):
             if len(row) < 4:
                 continue
             pid = row[0].strip()
@@ -547,20 +623,28 @@ class DockerRootlessProvider(EnvironmentProvider):
                 continue
             ppid = row[2].strip()
             cmd = " ".join(row[3:]).strip()
-            # process_id: hash de "pid:ppid:cmd" para distinguir procesos
-            # aunque el PID se reutilice (distinto ppid o cmd → distinto hash).
-            process_id = make_process_id(pid, f"{ppid}:{cmd}")
-            processes.append(
-                ProcessInfo(
-                    pid=pid,
-                    euid=euid,
-                    ppid=ppid,
-                    cmd=cmd,
-                    lstart="",  # no disponible vía container.top() sin overflow de columnas
-                    process_id=process_id,
-                )
+            lstart = lstart_by_pid.get(pid, "")
+            process_id = (
+                make_process_id(pid, lstart) if lstart else make_process_id(pid, cmd)
             )
-        return processes
+            processes_by_pid[pid] = ProcessInfo(
+                pid=pid,
+                euid=euid,
+                ppid=ppid,
+                cmd=cmd,
+                lstart=lstart,
+                process_id=process_id,
+                ppid_cmd="",
+                ancestor_cmds=[],
+            )
+
+        # Resolver ppid_cmd y ancestor_cmds cruzando por PID
+        for info in processes_by_pid.values():
+            parent = processes_by_pid.get(info.ppid)
+            info.ppid_cmd = parent.cmd if parent else ""
+            info.ancestor_cmds = _resolve_ancestors(info.pid, processes_by_pid)
+
+        return list(processes_by_pid.values())
 
     def cleanup_all(self) -> None:
         """Elimina TODOS los recursos de FlexiPwn (emergencia)."""

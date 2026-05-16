@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable
 
 from flexipwn.layer2.filesystem import FilesystemMonitor
+from flexipwn.layer2.log import LogMonitor
 from flexipwn.layer2.process import ProcessMonitor
 
 
@@ -43,12 +44,14 @@ class MonitorOrchestrator:
         self,
         filesystem_monitor: FilesystemMonitor,
         process_monitor: ProcessMonitor,
+        log_monitor: LogMonitor | None = None,
         poll_interval: float = 2.0,
         timeout_seconds: int | None = None,
         on_timeout: Callable[[], None] | None = None,
     ) -> None:
         self._fs = filesystem_monitor
         self._proc = process_monitor
+        self._log = log_monitor
         self._poll_interval = poll_interval
         self._timeout_seconds = timeout_seconds
         self._on_timeout = on_timeout
@@ -67,6 +70,8 @@ class MonitorOrchestrator:
                         return
                 self._fs._poll()
                 self._proc._poll()
+                if self._log is not None:
+                    self._log._poll()
                 time.sleep(self._poll_interval)
         except KeyboardInterrupt:
             pass

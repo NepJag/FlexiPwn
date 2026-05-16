@@ -8,13 +8,16 @@ from flexipwn.config import FlexiPwnConfig
 from flexipwn.layer1.docker_rootless import (
     DockerRootlessProvider,
     _generate_env_id,
+    _resolve_ancestors,
 )
 from flexipwn.layer1.provider import (
     ContainerStartError,
     EnvironmentNotFoundError,
     ImageNotFoundError,
+    ProcessInfo,
     ProviderError,
     SocketNotFoundError,
+    make_process_id,
 )
 
 
@@ -252,3 +255,131 @@ class TestWaitForHealthy:
         sleep_calls = [call.args[0] for call in mock_sleep.call_args_list]
         assert 1.0 in sleep_calls   # sleep inicial obligatorio
         assert 6.0 in sleep_calls   # remaining = 7.0 - 1.0
+
+
+# ---------------------------------------------------------------------------
+# TestGetProcesses — árbol de procesos con dos llamadas a top()
+# ---------------------------------------------------------------------------
+
+
+def _make_process_info(pid, euid, ppid, cmd, lstart="", ppid_cmd="", ancestor_cmds=None):
+    process_id = make_process_id(pid, lstart) if lstart else make_process_id(pid, cmd)
+    return ProcessInfo(
+        pid=pid, euid=euid, ppid=ppid, cmd=cmd,
+        lstart=lstart, process_id=process_id,
+        ppid_cmd=ppid_cmd, ancestor_cmds=ancestor_cmds or [],
+    )
+
+
+@patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
+class TestGetProcesses:
+
+    def _make_provider_with_top(self, _mock_detect, top_lstart_rows, top_info_rows):
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        # Primera llamada: lstart; segunda: info
+        mock_container.top.side_effect = [
+            {"Titles": ["PID", "STARTED"], "Processes": top_lstart_rows},
+            {"Titles": ["PID", "EUID", "PPID", "CMD"], "Processes": top_info_rows},
+        ]
+        mock_client.containers.get.return_value = mock_container
+        return DockerRootlessProvider(config=FlexiPwnConfig(), client=mock_client)
+
+    def test_get_processes_two_top_calls(self, _mock_detect):
+        """get_processes() hace exactamente dos llamadas a top() y rellena lstart."""
+        provider = self._make_provider_with_top(
+            _mock_detect,
+            top_lstart_rows=[
+                ["1",   "Mon", "Oct", "23", "10:25:44", "2023"],
+                ["100", "Mon", "Oct", "23", "10:30:00", "2023"],
+            ],
+            top_info_rows=[
+                ["1",   "0", "0", "init"],
+                ["100", "0", "1", "bash"],
+            ],
+        )
+
+        results = provider.get_processes("run-abcd1234")
+
+        assert len(results) == 2
+        by_pid = {p.pid: p for p in results}
+        p100 = by_pid["100"]
+        assert p100.lstart == "Mon Oct 23 10:30:00 2023"
+        assert p100.process_id == make_process_id("100", "Mon Oct 23 10:30:00 2023")
+        assert len(p100.process_id) == 12
+
+    def test_get_processes_resolves_ppid_cmd(self, _mock_detect):
+        """ppid_cmd se rellena con el cmd del proceso padre."""
+        provider = self._make_provider_with_top(
+            _mock_detect,
+            top_lstart_rows=[
+                ["42",  "Mon", "Oct", "23", "10:00:00", "2023"],
+                ["100", "Mon", "Oct", "23", "10:30:00", "2023"],
+            ],
+            top_info_rows=[
+                ["42",  "0", "1", "vim", "/etc/hosts"],
+                ["100", "0", "42", "bash"],
+            ],
+        )
+
+        results = provider.get_processes("run-abcd1234")
+        by_pid = {p.pid: p for p in results}
+
+        assert by_pid["100"].ppid_cmd == "vim /etc/hosts"
+        assert by_pid["42"].ppid_cmd == ""   # padre PID 1 no existe en esta muestra
+
+    def test_get_processes_resolves_ancestor_chain(self, _mock_detect):
+        """ancestor_cmds contiene la cadena [padre, abuelo, ...] del proceso."""
+        provider = self._make_provider_with_top(
+            _mock_detect,
+            top_lstart_rows=[
+                ["1",   "Mon", "Oct", "23", "10:00:00", "2023"],
+                ["30",  "Mon", "Oct", "23", "10:10:00", "2023"],
+                ["42",  "Mon", "Oct", "23", "10:20:00", "2023"],
+                ["100", "Mon", "Oct", "23", "10:30:00", "2023"],
+            ],
+            top_info_rows=[
+                ["1",   "0", "0", "bash"],
+                ["30",  "0", "1", "sudo vim"],
+                ["42",  "0", "30", "vim /etc/hosts"],
+                ["100", "0", "42", "bash"],
+            ],
+        )
+
+        results = provider.get_processes("run-abcd1234")
+        by_pid = {p.pid: p for p in results}
+
+        # bash(100) → vim(42) → sudo vim(30) → bash(1)
+        assert by_pid["100"].ancestor_cmds == ["vim /etc/hosts", "sudo vim", "bash"]
+
+    def test_ancestor_resolution_handles_cycle(self, _mock_detect):
+        """Un proceso con ppid apuntando a sí mismo no causa bucle infinito."""
+        # Simular un proceso con self-reference en ppid
+        by_pid_mock = {
+            "1": ProcessInfo(
+                pid="1", euid=0, ppid="1", cmd="init",
+                lstart="", process_id="aaa",
+                ppid_cmd="", ancestor_cmds=[],
+            )
+        }
+        result = _resolve_ancestors("1", by_pid_mock)
+        assert result == []
+
+    def test_ancestor_resolution_handles_mutual_cycle(self, _mock_detect):
+        """Ciclo A→B→A no causa bucle infinito."""
+        by_pid_mock = {
+            "A": ProcessInfo(
+                pid="A", euid=0, ppid="B", cmd="procA",
+                lstart="", process_id="aaa",
+                ppid_cmd="", ancestor_cmds=[],
+            ),
+            "B": ProcessInfo(
+                pid="B", euid=0, ppid="A", cmd="procB",
+                lstart="", process_id="bbb",
+                ppid_cmd="", ancestor_cmds=[],
+            ),
+        }
+        result = _resolve_ancestors("A", by_pid_mock)
+        # Visita B (agrega "procB"), luego A (agrega "procA"),
+        # luego intenta B de nuevo (ya visitado) → para
+        assert result == ["procB", "procA"]

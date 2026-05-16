@@ -1,0 +1,40 @@
+title: "SQL injection login bypass"
+description: >
+  La aplicación tiene una vulnerabilidad de SQL injection en el formulario
+  de login. Explota la vulnerabilidad para autenticarte sin credenciales
+  válidas y acceder a datos de la tabla sensitive_data.
+author: "Dylan Riquelme"
+level: beginner
+category: web
+
+environment:
+  image: "vuln-sqli-mysql"
+  attacker_image: "flexipwn-attacker-web"
+  log_paths:
+    - "/var/log/mysql/general.log"
+    - "/var/log/app/app.log"
+  startup_delay_seconds: 10.0
+
+hints:
+  - "Prueba ingresar una comilla simple en el campo de usuario"
+  - "El operador OR puede ser útil para evadir condiciones AND"
+  - "Ejemplo: admin' OR '1'='1' --"
+
+targets:
+  - type: log_pattern
+    field_matches:
+      raw_line: "SELECT.*sensitive_data"
+    description: "Query SQL sobre tabla sensitive_data detectada"
+
+  - type: log_pattern
+    field_matches:
+      raw_line: "OR.*1.*=.*1|UNION.*SELECT|--"
+    description: "Patrón de SQL injection detectado en query ejecutada"
+
+  - type: log_pattern
+    field_matches:
+      event_type: "authentication_success"
+    description: "Login exitoso detectado en log de aplicación"
+
+condition: all
+timeout_seconds: 1800

@@ -13,6 +13,10 @@ environment:
   ports: []
   startup_delay_seconds: 3
 
+hints:
+  - "Revisa tus permisos sudo con: sudo -l"
+  - "Vim puede ejecutar comandos del sistema con :!comando"
+
 targets:
   - type: file_created
     path: "/root/"
@@ -26,10 +30,9 @@ targets:
   - type: process_running
     euid: 0
     cmd_contains: "bash"
-    description: "Shell root activa (escalación exitosa via sudo vim)"
+    ppid_cmd_contains: "vim"
+    ancestor_contains: "sudo"
+    description: "Shell root lanzada desde vim (escalación exitosa)"
 
 condition: all
 timeout_seconds: 1800
-
-hints:
-  - "Revisa qué comandos puedes ejecutar como root con sudo -l"

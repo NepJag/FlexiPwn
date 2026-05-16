@@ -85,17 +85,6 @@ class ProcessMonitor:
                 self._baseline.add(process.process_id)
 
     def _emit_event(self, process: ProcessInfo) -> None:
-        """
-        Construye y emite un MonitorEvent de tipo process_spawned.
-
-        Campos en details:
-          pid: str
-          euid: int
-          ppid: str
-          cmd: str
-          lstart: str
-          process_id: str
-        """
         event = MonitorEvent(
             timestamp=datetime.now(timezone.utc),
             monitor_type="process",
@@ -110,6 +99,8 @@ class ProcessMonitor:
                 "cmd": process.cmd,
                 "lstart": process.lstart,
                 "process_id": process.process_id,
+                "ppid_cmd": process.ppid_cmd,
+                "ancestor_cmds": process.ancestor_cmds,
             },
         )
         self._on_event(event)

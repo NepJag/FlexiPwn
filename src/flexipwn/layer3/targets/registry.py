@@ -5,6 +5,7 @@ from flexipwn.layer3.targets.filesystem import (
     FileExistsEvaluator,
     FileModifiedEvaluator,
 )
+from flexipwn.layer3.targets.log import LogPatternEvaluator
 from flexipwn.layer3.targets.process import ProcessRunningEvaluator
 
 _EVALUATORS: dict[str, type[TargetEvaluator]] = {
@@ -12,14 +13,18 @@ _EVALUATORS: dict[str, type[TargetEvaluator]] = {
     "file_modified": FileModifiedEvaluator,
     "file_exists": FileExistsEvaluator,
     "process_running": ProcessRunningEvaluator,
+    "log_pattern": LogPatternEvaluator,
 }
 
 
-def get_evaluator(config: TargetConfig) -> TargetEvaluator:
+def get_evaluator(config: TargetConfig) -> TargetEvaluator | None:
     """
     Retorna el evaluador correspondiente al tipo de target.
-    Lanza NotImplementedError para tipos aún no implementados.
+    Retorna None para nodos lógicos (and/or/not) — se evalúan en el engine.
+    Lanza NotImplementedError para tipos hoja aún no implementados.
     """
+    if config.type in ("and", "or", "not"):
+        return None
     evaluator_cls = _EVALUATORS.get(config.type)
     if evaluator_cls is None:
         raise NotImplementedError(
