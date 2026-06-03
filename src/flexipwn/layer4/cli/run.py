@@ -125,7 +125,7 @@ def _provision_environment(
             f"[red]El escenario {scenario_config.title!r} no tiene imagen "
             f"atacante definida.[/red]\n"
             "Los estudiantes deben conectarse por SSH al contenedor atacante. "
-            "Agrega [yellow]attacker_image: flexipwn-attacker[/yellow] al "
+            "Agrega [yellow]attacker_image: flexipwn/attacker[/yellow] al "
             "YAML del escenario."
         )
         raise typer.Exit(1)

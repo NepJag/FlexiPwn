@@ -7,8 +7,8 @@ level: beginner
 category: pwning
 
 environment:
-  image: "vuln-sudo-privesc"
-  attacker_image: "flexipwn-attacker"
+  image: "flexipwn/vuln-sudo"
+  attacker_image: "flexipwn/attacker"
   log_paths: []
   ports: []
   startup_delay_seconds: 3

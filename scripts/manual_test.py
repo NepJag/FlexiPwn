@@ -8,7 +8,7 @@ Uso:
 from flexipwn.config import FlexiPwnConfig
 from flexipwn.layer1.docker_rootless import DockerRootlessProvider
 
-IMAGE = "flexipwn/vulnerable-sudo:latest"
+IMAGE = "flexipwn/vuln-sudo"
 SCENARIO = "sudo-vim-privesc"
 PARTICIPANT = "dylan"
 

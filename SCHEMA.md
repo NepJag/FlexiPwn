@@ -390,7 +390,7 @@ level: beginner
 category: pwning
 
 environment:
-  image: "flexipwn/vulnerable-sudo:latest"
+  image: "flexipwn/vuln-sudo"
   startup_delay_seconds: 3
 
 hints:
@@ -435,8 +435,8 @@ level: beginner
 category: web
 
 environment:
-  image: "vuln-sqli-mysql"
-  attacker_image: "flexipwn-attacker-web"
+  image: "flexipwn/vuln-sqli-mysql"
+  attacker_image: "flexipwn/attacker"
   log_paths:
     - "/var/log/mysql/general.log"
     - "/var/log/app/app.log"
@@ -502,8 +502,8 @@ level: intermediate
 category: web
 
 environment:
-  image: "vuln-command-injection"
-  attacker_image: "flexipwn-attacker"
+  image: "flexipwn/vuln-command-injection"
+  attacker_image: "flexipwn/attacker"
   attacker_ports:
     - "2222:22"
   startup_delay_seconds: 3.0

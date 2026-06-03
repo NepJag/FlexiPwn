@@ -122,7 +122,7 @@ def _setup_attacker_user(
         container="attacker",
     )
     # NO sudo: el estudiante trabaja solo con las herramientas pre-instaladas
-    # en flexipwn-attacker. Cualquier privesc dentro del contenedor atacante
+    # en flexipwn/attacker. Cualquier privesc dentro del contenedor atacante
     # invalida la metodología educativa.
 
 

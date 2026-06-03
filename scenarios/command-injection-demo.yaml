@@ -8,8 +8,8 @@ level: intermediate
 category: web
 
 environment:
-  image: "vuln-command-injection"
-  attacker_image: "flexipwn-attacker"
+  image: "flexipwn/vuln-command-injection"
+  attacker_image: "flexipwn/attacker"
   log_paths: []
   ports: []
   startup_delay_seconds: 3.0

