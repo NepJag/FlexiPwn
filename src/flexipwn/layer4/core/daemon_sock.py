@@ -320,10 +320,14 @@ def attach_client(sock_path: Path) -> None:
 
     El thread principal maneja prompt_toolkit y serializa los PROMPTs del wizard.
     """
+    from flexipwn.layer4.core.repl import build_repl_completer
+
     history_path = Path.home() / ".flexipwn" / "history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
     session: PromptSession[str] = PromptSession(
-        history=FileHistory(str(history_path))
+        history=FileHistory(str(history_path)),
+        completer=build_repl_completer(),
+        complete_while_typing=False,
     )
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

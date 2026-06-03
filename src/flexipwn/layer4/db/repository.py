@@ -25,6 +25,10 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+# Estados terminales de un run: el daemon ya no los procesa y tienen finished_at.
+TERMINAL_STATUSES = ("completed", "failed", "timeout", "stopped")
+
+
 # ---------------------------------------------------------------------------
 # Scenario
 # ---------------------------------------------------------------------------
@@ -162,7 +166,7 @@ def set_run_status(
     run.status = status
     if message is not None:
         run.daemon_message = message
-    if status in ("completed", "failed", "timeout", "stopped") and run.finished_at is None:
+    if status in TERMINAL_STATUSES and run.finished_at is None:
         run.finished_at = _now()
     session.add(run)
     session.commit()
@@ -308,6 +312,18 @@ def list_runs(
 
 def get_run_by_env_id(session: Session, env_id: str) -> ExerciseRun | None:
     return session.exec(select(ExerciseRun).where(ExerciseRun.env_id == env_id)).first()
+
+
+def delete_run(session: Session, run_id: uuid.UUID) -> None:
+    """Borra un run y sus filas hijas (no hay cascade en los modelos)."""
+    for target in get_target_results(session, run_id):
+        session.delete(target)
+    for event in list_run_events(session, run_id):
+        session.delete(event)
+    run = session.get(ExerciseRun, run_id)
+    if run is not None:
+        session.delete(run)
+    session.commit()
 
 
 # ---------------------------------------------------------------------------

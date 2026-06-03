@@ -161,6 +161,7 @@ participant remove <username>       — elimina (bloqueado si tiene runs activos
 run start                           — wizard: elige escenario + participante
 run stop <env_id>                   — detiene un run y destruye su entorno
 run reset <env_id>                  — recrea entorno preservando historial
+run remove <env_id>                 — elimina por completo un run terminal (DB + contenedores)
 run list                            — runs con contexto y estado
 run show <env_id>                   — detalle del run + historial de intentos
 run progress <env_id>               — estado de targets (snapshot)
@@ -169,9 +170,14 @@ run batch-start <yaml>              — crea runs masivos desde YAML
 
 daemon status                       — runs activos en este daemon
 
+clear                               — limpia la pantalla
 help                                — esta ayuda
 exit | quit                         — sale del REPL (en foreground también detiene el daemon)
 ```
+
+El prompt soporta **autocompletado con TAB**: nombres de comando (anidados, p. ej. `run <TAB>`) y rutas de archivo en los comandos que reciben un YAML (`scenario load`, `run batch-start`).
+
+`run remove` solo opera sobre runs en estado terminal (`completed`, `failed`, `timeout`, `stopped`); si el run sigue activo, detenlo antes con `run stop`.
 
 Todos estos también existen como subcomandos CLI clásicos: `uv run flexipwn run list`, `uv run flexipwn scenario show <id>`, etc.
 

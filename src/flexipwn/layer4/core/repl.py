@@ -6,6 +6,7 @@ sobre el prompt vía `prompt_toolkit.patch_stdout`.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -15,6 +16,7 @@ from pathlib import Path
 
 import typer
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, NestedCompleter, PathCompleter
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
@@ -137,6 +139,7 @@ Comandos disponibles:
   run start                           — wizard: elige escenario + participante
   run stop <env_id>                   — detiene un run y destruye su entorno
   run reset <env_id>                  — recrea entorno preservando historial
+  run remove <env_id>                 — elimina un run terminal (DB + contenedores)
   run list                            — runs con contexto y estado
   run show <env_id>                   — detalle del run
   run progress <env_id>               — estado de targets (snapshot)
@@ -145,9 +148,67 @@ Comandos disponibles:
 
   daemon status                       — runs activos en este daemon
 
+  clear                               — limpia la pantalla
   help                                — esta ayuda
   exit | quit                         — sale del REPL y detiene el daemon
 """
+
+
+# Comandos completables con TAB. Mantener en sync con _build_handlers y
+# _HELP_TEXT (exit/quit no son handlers pero se aceptan en el loop).
+_COMPLETION_COMMANDS = (
+    "help",
+    "clear",
+    "scenario list",
+    "scenario load",
+    "scenario show",
+    "participant add",
+    "participant list",
+    "participant remove",
+    "participant reset-password",
+    "run start",
+    "run stop",
+    "run reset",
+    "run remove",
+    "run list",
+    "run show",
+    "run progress",
+    "run watch",
+    "run batch-start",
+    "daemon status",
+    "exit",
+    "quit",
+)
+# Comandos cuyo argumento es una ruta a un YAML → completado de archivos.
+_PATH_COMMANDS = frozenset({"scenario load", "run batch-start"})
+
+
+def _is_yaml_or_dir(path: str) -> bool:
+    """Filtro de PathCompleter: muestra directorios (para navegar) y YAMLs."""
+    return os.path.isdir(path) or path.endswith((".yaml", ".yml"))
+
+
+def build_repl_completer() -> Completer:
+    """Completer de TAB compartido por el REPL foreground y el cliente attach.
+
+    Completa nombres de comando (anidados: ``run`` → ``start``/``stop``/…) y,
+    en los comandos que reciben un YAML, delega a completado de rutas.
+    """
+    yaml_completer = PathCompleter(expanduser=True, file_filter=_is_yaml_or_dir)
+    tree: dict[str, object] = {}
+    for cmd in _COMPLETION_COMMANDS:
+        parts = cmd.split()
+        node: dict[str, object] = tree
+        for depth, part in enumerate(parts):
+            if depth == len(parts) - 1:
+                node[part] = yaml_completer if cmd in _PATH_COMMANDS else None
+            else:
+                child = node.get(part)
+                if not isinstance(child, dict):
+                    child = {}
+                    node[part] = child
+                node = child
+    return NestedCompleter.from_nested_dict(tree)
 
 
 class FlexiPwnREPL:
@@ -168,7 +229,9 @@ class FlexiPwnREPL:
             history_path = Path.home() / ".flexipwn" / "history"
             history_path.parent.mkdir(parents=True, exist_ok=True)
         self.session: PromptSession[str] = PromptSession(
-            history=FileHistory(str(history_path))
+            history=FileHistory(str(history_path)),
+            completer=build_repl_completer(),
+            complete_while_typing=False,
         )
         # Prompter inyectable: foreground usa session.prompt; el server de socket
         # lo reemplaza por uno que viaja por el protocolo (PROMPT/INPUT).
@@ -187,6 +250,7 @@ class FlexiPwnREPL:
     def _build_handlers(self) -> dict[str, CommandHandler]:
         return {
             "help": self._cmd_help,
+            "clear": self._cmd_clear,
             "scenario list": self._cmd_scenario_list,
             "scenario load": self._cmd_scenario_load,
             "scenario show": self._cmd_scenario_show,
@@ -197,6 +261,7 @@ class FlexiPwnREPL:
             "run start": self._cmd_run_start,
             "run stop": self._cmd_run_stop,
             "run reset": self._cmd_run_reset,
+            "run remove": self._cmd_run_remove,
             "run list": self._cmd_run_list,
             "run show": self._cmd_run_show,
             "run progress": self._cmd_run_progress,
@@ -263,6 +328,9 @@ class FlexiPwnREPL:
 
     def _cmd_help(self, args: list[str]) -> None:
         self.console.print(_HELP_TEXT)
+
+    def _cmd_clear(self, args: list[str]) -> None:
+        self.console.clear()
 
     def _cmd_scenario_list(self, args: list[str]) -> None:
         from flexipwn.layer4.cli.scenario import scenario_list
@@ -377,6 +445,17 @@ class FlexiPwnREPL:
             return
         from flexipwn.layer4.cli.run import run_reset
         run_reset(args[0])
+
+    def _cmd_run_remove(self, args: list[str]) -> None:
+        if len(args) != 1:
+            self.console.print("[red]Uso:[/red] run remove <env_id>")
+            return
+        from flexipwn.layer4.cli.run import _perform_run_removal
+        _perform_run_removal(
+            args[0],
+            confirm=lambda msg: self._prompter(f"{msg} [y/N] ").strip().lower()
+            in ("y", "yes"),
+        )
 
     def _cmd_run_list(self, args: list[str]) -> None:
         from flexipwn.layer4.cli.run import run_list

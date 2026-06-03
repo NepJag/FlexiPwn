@@ -54,7 +54,9 @@ def scenario_list() -> None:
         return
 
     table = Table(title="Escenarios", show_header=True)
-    table.add_column("ID", style="dim", max_width=36)
+    # overflow="fold" envuelve el UUID (36 chars) en varias líneas cuando la
+    # tabla no cabe, en vez de recortarlo con "…" (overflow ellipsis por defecto).
+    table.add_column("ID", style="dim", width=36, overflow="fold")
     table.add_column("Título")
     table.add_column("Nivel", style="cyan")
     table.add_column("Categoría")

@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 import typer
 import yaml
@@ -433,6 +434,52 @@ def run_reset(env_id: str = typer.Argument(..., help="env_id del run")) -> None:
         f"[green]Reset solicitado para {env_id}.[/green] "
         f"El daemon recreará el entorno y publicará nuevas credenciales."
     )
+
+
+def _perform_run_removal(env_id: str, confirm: Callable[[str], bool]) -> bool:
+    """Guard + teardown de contenedores + borrado en DB de un run terminal.
+
+    `confirm` abstrae la única diferencia entre frontends (typer.confirm en la
+    CLI standalone vs. el prompter del REPL/socket). Devuelve True si se eliminó.
+    """
+    with get_session() as session:
+        run = repository.get_run_by_env_id(session, env_id)
+        if run is None:
+            console.print(f"[red]Run no encontrado:[/red] {env_id}")
+            return False
+        if run.status not in repository.TERMINAL_STATUSES:
+            console.print(
+                f"[red]No se puede eliminar un run en estado {run.status!r}.[/red]\n"
+                f"Debe estar terminado. Detenlo con "
+                f"[yellow]run stop {env_id}[/yellow] primero."
+            )
+            return False
+        run_id, status = run.id, run.status
+    if not confirm(
+        f"¿Eliminar run {env_id} (estado {status})? Borra DB y contenedores."
+    ):
+        console.print("[dim]Cancelado.[/dim]")
+        return False
+    # Teardown defensivo: en estado terminal el daemon ya destruyó el entorno,
+    # pero destroy() es idempotente y limpia cualquier residuo (contenedores,
+    # redes, volúmenes) aunque el daemon no esté corriendo.
+    try:
+        DockerRootlessProvider(config=FlexiPwnConfig()).destroy(env_id)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow]Aviso al destruir contenedores:[/yellow] {exc}")
+    with get_session() as session:
+        repository.delete_run(session, run_id)
+    console.print(f"[green]Run {env_id} eliminado (DB + contenedores).[/green]")
+    return True
+
+
+@app.command("remove")
+def run_remove(
+    env_id: str = typer.Argument(..., help="env_id del run"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="No pedir confirmación."),
+) -> None:
+    """Elimina por completo un run terminal (registro en DB + contenedores)."""
+    _perform_run_removal(env_id, confirm=lambda msg: yes or typer.confirm(msg))
 
 
 @app.command("watch")
