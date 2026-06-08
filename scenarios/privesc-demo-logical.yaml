@@ -1,0 +1,46 @@
+title: "Privilege escalation via sudo vim (and/or nodes)"
+description: >
+  Variante del escenario de escalación por sudo vim que expresa las condiciones
+  de victoria con nodos lógicos (and/or) en vez de una lista plana con
+  condition: all. Útil para validar la evaluación recursiva de nodos.
+author: "Dylan Riquelme"
+level: beginner
+category: pwning
+
+environment:
+  image: "flexipwn/vuln-sudo"
+  attacker_image: "flexipwn/attacker"
+  log_paths: []
+  ports: []
+  startup_delay_seconds: 3
+
+hints:
+  - "Conéctate al vulnerable desde el atacante: ssh ctfuser@flexipwn-<env_id>-vulnerable (clave: ctfpassword)"
+  - "Una vez dentro, revisa tus permisos sudo con: sudo -l"
+  - "Vim puede ejecutar comandos del sistema con :!comando"
+
+targets:
+  - type: and
+    description: "Escalación a root confirmada Y evidencia de escritura en el filesystem de root"
+    targets:
+      - type: process_running
+        euid: 0
+        cmd_contains: "bash"
+        ppid_cmd_contains: "vim"
+        ancestor_contains: "sudo"
+        description: "Shell root lanzada desde vim (escalación exitosa)"
+
+      - type: or
+        description: "Evidencia de acceso root: archivo creado en /root O /etc/passwd modificado"
+        targets:
+          - type: file_created
+            path: "/root/"
+            pattern: "*.txt"
+            description: "Archivo .txt creado en directorio root"
+
+          - type: file_modified
+            path: "/etc/passwd"
+            description: "Archivo de usuarios del sistema modificado"
+
+condition: all
+timeout_seconds: 18000
