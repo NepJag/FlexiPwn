@@ -31,7 +31,7 @@ targets:
 
   - type: log_pattern
     field_matches:
-      raw_line: "OR.*1.*=.*1|UNION.*SELECT|#"
+      raw_line: "OR.*1.*=.*1|UNION.*SELECT"
     description: "Patrón de SQL injection detectado en query ejecutada"
 
   - type: log_pattern
@@ -46,7 +46,7 @@ targets:
 
   - type: network_payload
     field_matches:
-      data: "OR.*1.*=.*1|UNION.*SELECT|#"
+      data: "OR.*1.*=.*1|UNION.*SELECT"
     description: "Patrón de SQL injection detectado en tráfico de red"
 
   - type: network_payload
