@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Habilitar general query log de MySQL apuntado a /var/log/mysql/general.log
-RUN echo "\n[mysqld]\ngeneral_log = 1\ngeneral_log_file = /var/log/mysql/general.log\nbind-address = 0.0.0.0" \
+RUN echo "\n[mysqld]\ngeneral_log = 1\ngeneral_log_file = /var/log/mysql/general.log\nbind-address = 0.0.0.0\ntls_version=" \
     >> /etc/mysql/mysql.conf.d/mysqld.cnf
 
 # El directorio /var/log/mysql ya existe en la imagen base de mysql-server,
