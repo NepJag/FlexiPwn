@@ -32,6 +32,7 @@ LABEL_MANAGED = "flexipwn.managed"
 LABEL_ENV_ID = "flexipwn.env_id"
 LABEL_SCENARIO_ID = "flexipwn.scenario_id"
 LABEL_PARTICIPANT_ID = "flexipwn.participant_id"
+LABEL_CAPTURE_FILTER = "flexipwn.capture_filter"
 
 SNIFFER_IMAGE = "nicolaka/netshoot"
 
@@ -267,18 +268,27 @@ class DockerRootlessProvider(EnvironmentProvider):
         os.chmod(capture_dir, 0o700)
         vuln_name = self._container_name(env_id, "vulnerable")
         sniffer_name = self._container_name(env_id, "sniffer")
-        base_cmd = "tcpdump -i any -A -n -l 2>/dev/null"
+        # AppArmor adjunta el perfil 'tcpdump' del host por la RUTA del binario
+        # (/usr/*/tcpdump) y deniega recibir señales de rootlesskit, dejando el
+        # sniffer imposible de detener. Copiándolo a /tmp/fpcap y ejecutándolo
+        # desde ahí, la ruta no coincide con el perfil → corre sin confinar y
+        # el teardown puede matarlo.
+        prep = 'T=$(command -v tcpdump); cp "$T" /tmp/fpcap'
+        sniff = "exec /tmp/fpcap -i any -A -n -l 2>/dev/null"
         if capture_filter:
-            cmd = f"{base_cmd} {capture_filter} > /capture/traffic.txt"
-        else:
-            cmd = f"{base_cmd} > /capture/traffic.txt"
+            sniff = f"{sniff} {capture_filter}"
+        cmd = f"{prep}; {sniff} > /capture/traffic.txt"
         self.client.containers.run(
             SNIFFER_IMAGE,
             name=sniffer_name,
             network_mode=f"container:{vuln_name}",
             command=["sh", "-c", cmd],
             volumes={str(capture_dir): {"bind": "/capture", "mode": "rw"}},
-            labels={"flexipwn.managed": "true", "flexipwn.env_id": env_id},
+            labels={
+                LABEL_MANAGED: "true",
+                LABEL_ENV_ID: env_id,
+                LABEL_CAPTURE_FILTER: capture_filter,
+            },
             detach=True,
             remove=False,
         )
@@ -287,7 +297,10 @@ class DockerRootlessProvider(EnvironmentProvider):
         name = self._container_name(env_id, "sniffer")
         try:
             c = self.client.containers.get(name)
-            c.stop(timeout=self.config.container_stop_timeout)
+            try:
+                c.stop(timeout=self.config.container_stop_timeout)
+            except Exception as exc:
+                logger.warning("No se pudo detener sniffer %s, forzando remove: %s", name, exc)
             c.remove(force=True)
         except NotFound:
             pass
@@ -554,7 +567,10 @@ class DockerRootlessProvider(EnvironmentProvider):
             name = self._container_name(env_id, role)
             try:
                 c = self.client.containers.get(name)
-                c.stop(timeout=timeout)
+                try:
+                    c.stop(timeout=timeout)
+                except Exception as exc:
+                    logger.warning("No se pudo detener %s, forzando remove: %s", name, exc)
                 c.remove(force=True)
             except NotFound:
                 pass
@@ -641,7 +657,22 @@ class DockerRootlessProvider(EnvironmentProvider):
         except NotFound:
             pass
 
+        # ¿Había sniffer? ¿con qué filtro? — para recrearlo idéntico
+        had_sniffer = False
+        capture_filter = ""
+        try:
+            old_sniffer = self.client.containers.get(
+                self._container_name(env_id, "sniffer")
+            )
+            had_sniffer = True
+            capture_filter = (old_sniffer.labels or {}).get(LABEL_CAPTURE_FILTER, "")
+        except NotFound:
+            pass
+
         timeout = self.config.container_stop_timeout
+
+        # Sniffer primero: comparte el netns del vulnerable que vamos a borrar
+        self._destroy_sniffer(env_id)
 
         # Detener y eliminar contenedores
         for role in ("vulnerable", "attacker"):
@@ -693,6 +724,13 @@ class DockerRootlessProvider(EnvironmentProvider):
                 raise ContainerStartError(
                     f"Error al reiniciar contenedor atacante: {exc}"
                 )
+
+        # Recrear el sniffer si el entorno tenía captura de red
+        if had_sniffer:
+            # Dar un instante a que el vulnerable arranque antes de unir su netns
+            time.sleep(1.0)
+            self._create_sniffer(env_id, capture_filter=capture_filter)
+
 
     def get_status(self, env_id: str) -> Environment:
         vuln = self._get_container(env_id, "vulnerable")
@@ -854,11 +892,19 @@ class DockerRootlessProvider(EnvironmentProvider):
         containers = self.client.containers.list(
             all=True, filters={"label": f"{LABEL_MANAGED}=true"}
         )
-        for c in containers:
+        # Sniffers primero: comparten el netns del vulnerable; borrarlos
+        # después dejaría el netns colgando y remove con EPERM.
+        ordered = sorted(
+            containers,
+            key=lambda c: 0 if c.name.endswith("-sniffer") else 1,
+        )
+        for c in ordered:
             try:
                 c.remove(force=True)
             except Exception as exc:
-                logger.warning("cleanup_all: error eliminando contenedor %s: %s", c.name, exc)
+                logger.warning(
+                    "cleanup_all: error eliminando contenedor %s: %s", c.name, exc
+                )
 
         # Redes
         networks = self.client.networks.list(
