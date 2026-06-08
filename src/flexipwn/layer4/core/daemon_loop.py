@@ -25,7 +25,7 @@ from flexipwn.layer2.network import NetworkMonitor
 from flexipwn.layer2.orchestrator import MonitorOrchestrator
 from flexipwn.layer2.process import ProcessMonitor
 from flexipwn.layer3.engine import EvaluationEngine, EvaluationResult
-from flexipwn.layer3.schema import ScenarioConfig
+from flexipwn.layer3.schema import ScenarioConfig, scenario_requires_network_capture
 from flexipwn.layer4.core.port_allocator import find_free_port
 from flexipwn.layer4.core.super_monitor import RichProgressPrinter, SuperMonitor
 from flexipwn.layer4.db import repository
@@ -46,9 +46,7 @@ def _build_orchestrator(
     event_sink,
     on_stopped,
 ) -> MonitorOrchestrator:
-    enable_network_capture = any(
-        t.type.startswith("network_") for t in scenario_config.targets
-    )
+    enable_network_capture = scenario_requires_network_capture(scenario_config)
 
     host_log_paths: list[str] = []
     for container_log_path in scenario_config.environment.log_paths:
@@ -460,8 +458,8 @@ class DaemonLoop:
                     "startup_delay_seconds",
                     scenario_config.environment.startup_delay_seconds,
                 ),
-                enable_network_capture=any(
-                    t.type.startswith("network_") for t in scenario_config.targets
+                enable_network_capture=scenario_requires_network_capture(
+                    scenario_config
                 ),
                 capture_filter=payload.get(
                     "capture_filter", scenario_config.environment.capture_filter

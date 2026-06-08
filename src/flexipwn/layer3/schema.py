@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Literal
 
@@ -117,6 +118,33 @@ class ScenarioConfig(BaseModel):
                     "Úsalo dentro de un nodo 'and' o 'or'."
                 )
         return self
+
+
+def iter_leaf_targets(targets: list[TargetConfig]) -> "Iterator[TargetConfig]":
+    """
+    Itera recursivamente las hojas del árbol de targets, entrando en los nodos
+    lógicos (and/or/not). Los nodos lógicos en sí no se emiten — solo las hojas
+    evaluables (file_*, process_running, network_*, etc.).
+
+    Fuente única de verdad para cualquier decisión que dependa de los tipos de
+    target presentes (p. ej. si levantar el sniffer de red). Evita el bug de
+    inspeccionar solo los targets de primer nivel, que ignora las hojas
+    envueltas en un and/or/not.
+    """
+    for target in targets:
+        if target.type in ("and", "or", "not"):
+            yield from iter_leaf_targets(target.targets or [])
+        else:
+            yield target
+
+
+def scenario_requires_network_capture(scenario: ScenarioConfig) -> bool:
+    """True si alguna hoja del escenario es de tipo network_* (a cualquier
+    profundidad del árbol lógico). Decide si se levanta el NetworkMonitor."""
+    return any(
+        leaf.type.startswith("network_")
+        for leaf in iter_leaf_targets(scenario.targets)
+    )
 
 
 def load_scenario(yaml_path: str | Path) -> ScenarioConfig:

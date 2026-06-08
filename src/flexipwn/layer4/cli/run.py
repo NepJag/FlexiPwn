@@ -16,6 +16,7 @@ from rich.table import Table
 from flexipwn.config import FlexiPwnConfig
 from flexipwn.layer1.docker_rootless import DockerRootlessProvider
 from flexipwn.layer1.provider import ImageNotFoundError
+from flexipwn.layer3.schema import scenario_requires_network_capture
 from flexipwn.layer4.cli.daemon import require_daemon
 from flexipwn.layer4.core.port_allocator import find_free_port
 from flexipwn.layer4.db import repository
@@ -155,8 +156,8 @@ def _provision_environment(
             attacker_ports=[f"{ssh_port}:22"],
             log_paths=scenario_config.environment.log_paths or None,
             startup_delay=scenario_config.environment.startup_delay_seconds,
-            enable_network_capture=any(
-                t.type.startswith("network_") for t in scenario_config.targets
+            enable_network_capture=scenario_requires_network_capture(
+                scenario_config
             ),
             capture_filter=scenario_config.environment.capture_filter,
         )
