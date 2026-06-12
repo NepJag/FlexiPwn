@@ -27,6 +27,11 @@ from flexipwn.layer2.process import ProcessMonitor
 from flexipwn.layer3.engine import EvaluationEngine, EvaluationResult
 from flexipwn.layer3.schema import ScenarioConfig, scenario_requires_network_capture
 from flexipwn.layer4.core.port_allocator import find_free_port
+from flexipwn.layer4.core.notifications import (
+    Notification,
+    NotificationKind,
+    NotificationSink,
+)
 from flexipwn.layer4.core.super_monitor import RichProgressPrinter, SuperMonitor
 from flexipwn.layer4.db import repository
 from flexipwn.layer4.db.models import ExerciseRun, Participant
@@ -142,7 +147,10 @@ class DaemonLoop:
             poll_interval=self.config.super_monitor_poll_interval,
             max_workers=self.config.super_monitor_max_workers,
         )
-        self.printer = RichProgressPrinter(self.console)
+        # Sink único para todas las notificaciones del daemon. La política por
+        # defecto silencia SSH_READY (no ensucia el TTY) e imprime el progreso.
+        self.notifier = NotificationSink(self.console)
+        self.printer = RichProgressPrinter(notifier=self.notifier)
         self._stop_event = threading.Event()
         # env_id -> (engine, orchestrator) para no duplicar registros
         self._registered: dict[str, tuple[EvaluationEngine, MonitorOrchestrator]] = {}
@@ -296,9 +304,16 @@ class DaemonLoop:
                 repository.set_attacker_ssh_credentials(
                     session, run_id, username, password, existing_port or 0
                 )
-            self.console.print(
-                f"[green][{env_id}][/green] SSH listo: "
-                f"ssh {username}@{self.config.host} -p {existing_port} (clave: {password})"
+            self.notifier.emit(
+                Notification(
+                    kind=NotificationKind.SSH_READY,
+                    env_id=env_id,
+                    message=(
+                        f"[green][{env_id}][/green] SSH listo: "
+                        f"ssh {username}@{self.config.host} -p {existing_port} "
+                        f"(clave: {password})"
+                    ),
+                )
             )
 
         engine = EvaluationEngine(

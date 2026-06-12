@@ -13,6 +13,11 @@ from rich.console import Console
 
 from flexipwn.layer2.orchestrator import MonitorOrchestrator
 from flexipwn.layer3.engine import EvaluationResult, TargetResult as EngineTargetResult
+from flexipwn.layer4.core.notifications import (
+    Notification,
+    NotificationKind,
+    NotificationSink,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +165,14 @@ class RichProgressPrinter:
     como `on_update` al EvaluationEngine.
     """
 
-    def __init__(self, console: Console | None = None) -> None:
-        self._console = console or Console()
+    def __init__(
+        self,
+        console: Console | None = None,
+        notifier: NotificationSink | None = None,
+    ) -> None:
+        # Si solo recibimos un console (p. ej. en tests), envolvemos un sink
+        # por defecto sobre él para no cambiar el comportamiento observable.
+        self._notifier = notifier or NotificationSink(console or Console())
         self._announced: dict[str, set[int]] = {}
         self._lock = threading.Lock()
 
@@ -172,13 +183,21 @@ class RichProgressPrinter:
                 fresh: list[EngineTargetResult] = []
                 self._collect_fresh(result.targets, announced, fresh)
             for t in fresh:
-                self._console.print(
-                    f"[green][{env_id}][/green] ✓ {t.description}"
+                self._notifier.emit(
+                    Notification(
+                        kind=NotificationKind.TARGET_MATCHED,
+                        env_id=env_id,
+                        message=f"[green][{env_id}][/green] ✓ {t.description}",
+                    )
                 )
             matched, total = _count_leaves(result.targets)
             pct = int(result.progress * 100)
-            self._console.print(
-                f"[{env_id}] Progreso: {matched}/{total} ({pct}%)"
+            self._notifier.emit(
+                Notification(
+                    kind=NotificationKind.PROGRESS,
+                    env_id=env_id,
+                    message=f"[{env_id}] Progreso: {matched}/{total} ({pct}%)",
+                )
             )
 
         return _on_update
