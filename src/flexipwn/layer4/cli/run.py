@@ -12,6 +12,7 @@ import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from flexipwn.config import FlexiPwnConfig
 from flexipwn.layer1.docker_rootless import DockerRootlessProvider
@@ -28,6 +29,20 @@ console = Console()
 
 DAEMON_CRED_TIMEOUT_SECONDS = 30
 BATCH_CRED_TIMEOUT_SECONDS = 60
+
+
+class ProvisionError(Exception):
+    """Falla al aprovisionar un entorno.
+
+    `_provision_environment` la lanza en vez de cortar el proceso: `run start`
+    la traduce a `typer.Exit`, mientras que `batch-start` la captura para
+    registrar el fallo y seguir con el siguiente entorno. `message` ya viene
+    con markup Rich listo para imprimir.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
 
 
 # ---------------------------------------------------------------------------
@@ -116,28 +131,25 @@ def _provision_environment(
     with get_session() as session:
         scenario = repository.get_scenario(session, scenario_id)
         if scenario is None:
-            console.print("[red]Escenario no encontrado en DB.[/red]")
-            raise typer.Exit(1)
+            raise ProvisionError("[red]Escenario no encontrado en DB.[/red]")
         scenario_config = repository.parse_scenario_config(scenario)
         scenario_db_id = scenario.id
 
     if scenario_config.environment.attacker_image is None:
-        console.print(
+        raise ProvisionError(
             f"[red]El escenario {scenario_config.title!r} no tiene imagen "
             f"atacante definida.[/red]\n"
             "Los estudiantes deben conectarse por SSH al contenedor atacante. "
             "Agrega [yellow]attacker_image: flexipwn/attacker[/yellow] al "
             "YAML del escenario."
         )
-        raise typer.Exit(1)
 
     try:
         ssh_port = find_free_port(
             config.attacker_port_range_start, config.attacker_port_range_end
         )
     except RuntimeError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1)
+        raise ProvisionError(f"[red]{exc}[/red]")
 
     provider = DockerRootlessProvider(config=config)
 
@@ -162,11 +174,9 @@ def _provision_environment(
             capture_filter=scenario_config.environment.capture_filter,
         )
     except ImageNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1)
+        raise ProvisionError(f"[red]{exc}[/red]")
     except Exception as exc:
-        console.print(f"[red]Error creando entorno:[/red] {exc}")
-        raise typer.Exit(1)
+        raise ProvisionError(f"[red]Error creando entorno:[/red] {exc}")
 
     env_id = docker_env.env_id
 
@@ -246,7 +256,13 @@ def run_start(
         participant_id = _resolve_participant(participant)
 
     config = FlexiPwnConfig()
-    env_id, ssh_port, run_id = _provision_environment(scenario_id, participant_id, config)
+    try:
+        env_id, ssh_port, run_id = _provision_environment(
+            scenario_id, participant_id, config
+        )
+    except ProvisionError as exc:
+        console.print(exc.message)
+        raise typer.Exit(1)
 
     console.print(f"\n[green]Entorno activo:[/green] [bold]{env_id}[/bold]")
     username, password = _wait_for_credentials(run_id, DAEMON_CRED_TIMEOUT_SECONDS)
@@ -312,8 +328,10 @@ def run_batch_start(
         for _ in range(count):
             expanded.append((title, scenario.id))
 
-    # Ejecutar secuencialmente
+    # Ejecutar secuencialmente. Un fallo al aprovisionar un entorno NO aborta
+    # el batch: se registra y se sigue con el siguiente (política continue-on-error).
     rows: list[dict] = []
+    failures: list[dict] = []
     for i, (title, scenario_id) in enumerate(expanded, 1):
         console.print(f"\n[bold]({i}/{len(expanded)})[/bold] {title}")
         with get_session() as session:
@@ -321,7 +339,22 @@ def run_batch_start(
             participant_id = participant.id
             username = participant.username
 
-        env_id, ssh_port, run_id = _provision_environment(scenario_id, participant_id, config)
+        try:
+            env_id, ssh_port, run_id = _provision_environment(
+                scenario_id, participant_id, config
+            )
+        except ProvisionError as exc:
+            # Limpia el participante huérfano: se creó antes de saber que el
+            # aprovisionamiento fallaría, y sin run asociado no sirve de nada.
+            with get_session() as session:
+                repository.delete_participant(session, participant_id)
+            reason = Text.from_markup(exc.message).plain
+            console.print(f"  [red]✗ Falló:[/red] {exc.message}")
+            failures.append(
+                {"scenario": title, "username": username, "error": reason}
+            )
+            continue
+
         rows.append(
             {
                 "scenario": title,
@@ -333,42 +366,64 @@ def run_batch_start(
             }
         )
 
-    # Esperar credenciales del daemon
-    deadline = time.monotonic() + BATCH_CRED_TIMEOUT_SECONDS
-    pending = {row["run_id"]: row for row in rows}
-    console.print(
-        "[cyan]Esperando que el daemon publique credenciales SSH...[/cyan]"
-    )
-    while pending and time.monotonic() < deadline:
-        with get_session() as session:
-            for run_id, row in list(pending.items()):
-                run = session.get(ExerciseRun, run_id)
-                if run and run.attacker_ssh_password:
-                    row["ssh_password"] = run.attacker_ssh_password
-                    pending.pop(run_id)
-        if pending:
-            time.sleep(1.0)
-
-    # Tabla de salida
-    table = Table(title="Asignaciones creadas", show_header=True)
-    table.add_column("Escenario", style="cyan")
-    table.add_column("Usuario")
-    table.add_column("env_id", style="dim")
-    table.add_column("Puerto SSH")
-    table.add_column("Clave SSH")
-    for row in rows:
-        pw = row["ssh_password"] or "[yellow]pendiente[/yellow]"
-        table.add_row(
-            row["scenario"], row["username"], row["env_id"],
-            str(row["ssh_port"]), pw,
+    # Esperar credenciales del daemon (solo para los entornos que sí se crearon)
+    if rows:
+        deadline = time.monotonic() + BATCH_CRED_TIMEOUT_SECONDS
+        pending = {row["run_id"]: row for row in rows}
+        console.print(
+            "[cyan]Esperando que el daemon publique credenciales SSH...[/cyan]"
         )
-    console.print(table)
+        while pending and time.monotonic() < deadline:
+            with get_session() as session:
+                for run_id, row in list(pending.items()):
+                    run = session.get(ExerciseRun, run_id)
+                    if run and run.attacker_ssh_password:
+                        row["ssh_password"] = run.attacker_ssh_password
+                        pending.pop(run_id)
+            if pending:
+                time.sleep(1.0)
+
+    # Tabla de asignaciones creadas
+    if rows:
+        table = Table(title="Asignaciones creadas", show_header=True)
+        table.add_column("Escenario", style="cyan")
+        table.add_column("Usuario")
+        table.add_column("env_id", style="dim")
+        table.add_column("Puerto SSH")
+        table.add_column("Clave SSH")
+        for row in rows:
+            pw = row["ssh_password"] or "[yellow]pendiente[/yellow]"
+            table.add_row(
+                row["scenario"], row["username"], row["env_id"],
+                str(row["ssh_port"]), pw,
+            )
+        console.print(table)
+
+    # Tabla de fallos
+    if failures:
+        ftable = Table(title="Fallos", show_header=True, border_style="red")
+        ftable.add_column("Escenario", style="cyan")
+        ftable.add_column("Usuario")
+        ftable.add_column("Motivo", style="red")
+        for f in failures:
+            ftable.add_row(f["scenario"], f["username"], f["error"])
+        console.print(ftable)
+
+    # Resumen
+    total = len(expanded)
+    console.print(
+        f"\n[bold]Resumen:[/bold] "
+        f"[green]{len(rows)} creado(s)[/green], "
+        f"[red]{len(failures)} fallido(s)[/red] de {total}."
+    )
 
     if output:
         out_path = Path(output)
         with open(out_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["scenario", "username", "env_id", "ssh_port", "ssh_password"])
+            writer.writerow(
+                ["scenario", "username", "env_id", "ssh_port", "ssh_password", "status", "error"]
+            )
             for row in rows:
                 writer.writerow(
                     [
@@ -377,7 +432,13 @@ def run_batch_start(
                         row["env_id"],
                         row["ssh_port"],
                         row["ssh_password"] or "",
+                        "created",
+                        "",
                     ]
+                )
+            for fail in failures:
+                writer.writerow(
+                    [fail["scenario"], fail["username"], "", "", "", "failed", fail["error"]]
                 )
         console.print(f"\n[green]CSV escrito:[/green] {out_path}")
         if any(r["ssh_password"] is None for r in rows):
