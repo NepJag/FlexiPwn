@@ -1,0 +1,5 @@
+assignments:
+  - scenario: "Privilege escalation via sudo vim"
+    count: 10
+  - scenario: "Command Injection → Reverse Shell"
+    count: 10
