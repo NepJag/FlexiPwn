@@ -18,7 +18,7 @@ from flexipwn.layer4.db.models import (
 )
 from flexipwn.layer2.events import MonitorEvent
 from flexipwn.layer3.engine import EvaluationResult
-from flexipwn.layer3.schema import ScenarioConfig, load_scenario
+from flexipwn.layer3.schema import ScenarioConfig, iter_leaf_targets, load_scenario
 
 
 def _now() -> datetime:
@@ -331,27 +331,38 @@ def delete_run(session: Session, run_id: uuid.UUID) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _collect_leaf_targets(targets, parent_index=""):
-    leaves = []
-    for i, t in enumerate(targets):
-        if t.type in ("and", "or", "not"):
-            sub = _collect_leaf_targets(t.targets or [], parent_index=f"{parent_index}{i}.")
-            leaves.extend(sub)
+def _iter_leaf_results(targets):
+    """Hojas del árbol de resultados del motor, en DFS (descendiendo and/or/not).
+
+    Espeja exactamente a `iter_leaf_targets` sobre la config: como ambos árboles
+    tienen la misma forma, ambas iteraciones emiten las hojas en el mismo orden.
+    Esa correspondencia posicional es lo que hace robusto el matcheo por índice
+    secuencial (sin necesidad de un path jerárquico en la DB).
+    """
+    for t in targets:
+        if t.children:
+            yield from _iter_leaf_results(t.children)
         else:
-            leaves.append((i, t))
-    return leaves
+            yield t
 
 
 def bulk_create_target_results(
     session: Session, run_id: uuid.UUID, scenario_config: ScenarioConfig
 ) -> list[TargetResult]:
+    """Persiste una fila por HOJA del escenario (no por target de primer nivel).
+
+    Antes solo se guardaban los targets de primer nivel: con una raíz and/or eso
+    dejaba una única fila (el nodo lógico) y los pasos intermedios reales nunca
+    se persistían. Ahora se aplana el árbol con `iter_leaf_targets` y cada hoja
+    recibe un `target_index` secuencial global (0..N) en orden DFS.
+    """
     results = []
-    for i, target in enumerate(scenario_config.targets):
+    for i, leaf in enumerate(iter_leaf_targets(scenario_config.targets)):
         tr = TargetResult(
             run_id=run_id,
             target_index=i,
-            target_type=target.type,
-            description=target.description,
+            target_type=leaf.type,
+            description=leaf.description,
         )
         session.add(tr)
         results.append(tr)
@@ -367,8 +378,10 @@ def update_target_results_from_engine(
     )
     db_by_index = {t.target_index: t for t in db_targets if t.reset_at is None}
 
-    for et in engine_result.targets:
-        db_t = db_by_index.get(et.target_index)
+    # Mismo aplanado DFS que en bulk_create → la posición i de la hoja del motor
+    # corresponde a la fila con target_index == i.
+    for i, et in enumerate(_iter_leaf_results(engine_result.targets)):
+        db_t = db_by_index.get(i)
         if db_t is None:
             continue
         if et.matched and not db_t.matched:
@@ -443,3 +456,187 @@ def list_run_events(
         stmt = stmt.where(RunEvent.timestamp > since)
     stmt = stmt.order_by(RunEvent.timestamp)  # type: ignore[arg-type]
     return list(session.exec(stmt).all())
+
+
+# ---------------------------------------------------------------------------
+# Dashboard + feed (vista del educador para muchos entornos simultáneos)
+#
+# Dos vistas, ambas leídas de la DB (no del buffer en memoria del
+# NotificationSink):
+#   - Dashboard: estado actual por entorno (ExerciseRun + conteo TargetResult).
+#   - Feed: hitos cronológicos "objetivo cumplido" (TargetResult.matched_at),
+#     que es el equivalente persistente de las notificaciones TARGET_MATCHED.
+# `run_events` queda como stream crudo por-entorno para `run watch`.
+# ---------------------------------------------------------------------------
+
+# Estados "vivos" que el educador quiere vigilar en el dashboard/feed.
+ACTIVE_STATUSES = ("pending", "running", "stopping", "resetting")
+
+
+def _is_finished_today(run: ExerciseRun, today) -> bool:
+    return run.finished_at is not None and run.finished_at.date() == today
+
+
+def dashboard_rows(session: Session, *, include_finished: bool = False) -> list[dict]:
+    """Una fila por entorno con su estado agregado.
+
+    Por defecto solo entornos activos; con ``include_finished`` agrega los que
+    terminaron hoy (status terminal con finished_at del día).
+    """
+    today = _now().date()
+    rows = list(
+        session.exec(
+            select(ExerciseRun, Scenario, Participant)
+            .join(Scenario, Scenario.id == ExerciseRun.scenario_id)
+            .join(Participant, Participant.id == ExerciseRun.participant_id)
+        ).all()
+    )
+    out: list[dict] = []
+    for run, scenario, participant in rows:
+        is_active = run.status in ACTIVE_STATUSES
+        if not is_active and not (include_finished and _is_finished_today(run, today)):
+            continue
+        # Targets del intento actual (reset_at None).
+        current = [t for t in get_target_results(session, run.id) if t.reset_at is None]
+        total = len(current)
+        matched = [t for t in current if t.matched]
+        last = max(
+            matched,
+            key=lambda t: t.matched_at or datetime.min.replace(tzinfo=UTC),
+            default=None,
+        )
+        out.append(
+            {
+                "env_id": run.env_id,
+                "scenario_title": scenario.title,
+                "participant_username": participant.username,
+                "status": run.status,
+                "matched": len(matched),
+                "total": total,
+                "progress": run.progress,
+                "last_desc": last.description if last else None,
+                "last_at": last.matched_at if last else None,
+                "started_at": run.started_at,
+            }
+        )
+    # Activos primero, luego por progreso descendente.
+    out.sort(
+        key=lambda r: (
+            r["status"] not in ACTIVE_STATUSES,
+            -(r["matched"] / r["total"] if r["total"] else 0.0),
+        )
+    )
+    return out
+
+
+def feed_milestones(
+    session: Session,
+    *,
+    all_history: bool = False,
+    limit: int | None = 40,
+) -> list[dict]:
+    """Registro cronológico de hitos cruzando entornos.
+
+    Es un LOG persistente, agnóstico al estado del run: un hito que ocurrió
+    sigue en el feed aunque el run ya haya terminado (no se filtra por status).
+    Dos tipos de entrada (campo ``kind``):
+      - ``"target"``: una hoja del escenario que se cumplió (TargetResult.matched).
+      - ``"scenario_completed"``: el run completó el escenario (ExerciseRun
+        terminal 'completed' con finished_at) — equivale al viejo print
+        '✓ ESCENARIO COMPLETADO', ahora persistente y dentro del feed.
+
+    Por defecto solo entradas de HOY (para no crecer sin límite en pantalla);
+    ``all_history`` devuelve todo. Retorna las ``limit`` más recientes (None =
+    todas), del más viejo al más nuevo.
+    """
+    today = _now().date()
+    items: list[dict] = []
+
+    # 1) Hitos de objetivos (hojas matcheadas del intento actual).
+    target_rows = list(
+        session.exec(
+            select(TargetResult, ExerciseRun, Participant)
+            .join(ExerciseRun, ExerciseRun.id == TargetResult.run_id)
+            .join(Participant, Participant.id == ExerciseRun.participant_id)
+            .where(TargetResult.matched.is_(True))
+            .where(TargetResult.reset_at.is_(None))
+        ).all()
+    )
+    for target, run, participant in target_rows:
+        at = target.matched_at
+        if not all_history and (at is None or at.date() != today):
+            continue
+        items.append(
+            {
+                "kind": "target",
+                "at": at,
+                "env_id": run.env_id,
+                "participant_username": participant.username,
+                "description": target.description,
+            }
+        )
+
+    # 2) Escenarios completados (entrada propia del feed).
+    completed_rows = list(
+        session.exec(
+            select(ExerciseRun, Participant)
+            .join(Participant, Participant.id == ExerciseRun.participant_id)
+            .where(ExerciseRun.status == "completed")
+        ).all()
+    )
+    for run, participant in completed_rows:
+        at = run.finished_at
+        if at is None:
+            continue
+        if not all_history and at.date() != today:
+            continue
+        items.append(
+            {
+                "kind": "scenario_completed",
+                "at": at,
+                "env_id": run.env_id,
+                "participant_username": participant.username,
+                "description": "ESCENARIO COMPLETADO",
+            }
+        )
+
+    items.sort(key=lambda i: i["at"] or datetime.min.replace(tzinfo=UTC))
+    if limit is not None:
+        items = items[-limit:]
+    return items
+
+
+def count_new_milestones(session: Session, since: datetime) -> int:
+    """Cuántas novedades hay después de ``since`` (base del badge del prompt).
+
+    Cuenta hitos de objetivos + escenarios completados, agnóstico al estado del
+    run (alineado con el feed). Cualquier cosa que entre al feed bumpea el badge.
+    """
+    target_count = len(
+        session.exec(
+            select(TargetResult.id)
+            .where(TargetResult.matched.is_(True))
+            .where(TargetResult.reset_at.is_(None))
+            .where(TargetResult.matched_at.is_not(None))
+            .where(TargetResult.matched_at > since)
+        ).all()
+    )
+    completed_count = len(
+        session.exec(
+            select(ExerciseRun.id)
+            .where(ExerciseRun.status == "completed")
+            .where(ExerciseRun.finished_at.is_not(None))
+            .where(ExerciseRun.finished_at > since)
+        ).all()
+    )
+    return target_count + completed_count
+
+
+def count_active_envs(session: Session) -> int:
+    return len(
+        session.exec(
+            select(ExerciseRun.id).where(
+                ExerciseRun.status.in_(ACTIVE_STATUSES)
+            )
+        ).all()
+    )
