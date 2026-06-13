@@ -553,8 +553,15 @@ class DaemonLoop:
                     with self._registered_lock:
                         self._registered.pop(env_id, None)
                     self.provider.destroy(env_id)
-                    self.console.print(
-                        f"[bold green][{env_id}] ✓ ESCENARIO COMPLETADO[/bold green]"
+                    # Ya no es un print suelto sobre el prompt: va por el sink
+                    # (silenciado) y queda como entrada persistente del feed,
+                    # sintetizada desde ExerciseRun.finished_at.
+                    self.notifier.emit(
+                        Notification(
+                            kind=NotificationKind.RUN_COMPLETED,
+                            env_id=env_id,
+                            message=f"[bold green][{env_id}] ✓ ESCENARIO COMPLETADO[/bold green]",
+                        )
                     )
                 except Exception:
                     logger.exception("Error finalizando run completado")

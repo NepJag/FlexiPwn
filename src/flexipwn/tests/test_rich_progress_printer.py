@@ -6,7 +6,25 @@ from io import StringIO
 from rich.console import Console
 
 from flexipwn.layer3.engine import EvaluationResult, TargetResult
+from flexipwn.layer4.core.notifications import (
+    NotificationKind,
+    NotificationPolicy,
+    NotificationSink,
+)
 from flexipwn.layer4.core.super_monitor import RichProgressPrinter
+
+
+def _printing_printer(console: Console) -> RichProgressPrinter:
+    """Printer cuyo sink imprime (la política por defecto ahora silencia, así
+    que para verificar la salida forzamos PRINT en este test)."""
+    sink = NotificationSink(
+        console,
+        policy={
+            NotificationKind.TARGET_MATCHED: NotificationPolicy.PRINT,
+            NotificationKind.PROGRESS: NotificationPolicy.PRINT,
+        },
+    )
+    return RichProgressPrinter(notifier=sink)
 
 
 def _make_result(targets: list[TargetResult], progress: float) -> EvaluationResult:
@@ -24,7 +42,7 @@ def _make_result(targets: list[TargetResult], progress: float) -> EvaluationResu
 def test_announces_each_matched_target_once():
     buf = StringIO()
     console = Console(file=buf, force_terminal=False, width=120, no_color=True)
-    printer = RichProgressPrinter(console=console)
+    printer = _printing_printer(console)
     cb = printer.build_callback("run-aaaa1111")
 
     t = TargetResult(
@@ -47,7 +65,7 @@ def test_announces_each_matched_target_once():
 def test_skips_logical_nodes_for_announcement():
     buf = StringIO()
     console = Console(file=buf, force_terminal=False, width=120, no_color=True)
-    printer = RichProgressPrinter(console=console)
+    printer = _printing_printer(console)
     cb = printer.build_callback("run-bbbb2222")
 
     leaf = TargetResult(

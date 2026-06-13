@@ -35,8 +35,27 @@ def test_ssh_ready_se_silencia_pero_queda_en_buffer():
     assert recientes[0].kind is NotificationKind.SSH_READY
 
 
-def test_progreso_si_se_imprime():
+def test_progreso_se_silencia_por_defecto():
+    # Cambio de diseño: el feed/dashboard reemplaza los prints intercalados,
+    # así que PROGRESS y TARGET_MATCHED se silencian por defecto. El equivalente
+    # persistente vive en ExerciseRun.progress / TargetResult.matched_at.
     sink, buf = _sink_with_buffer()
+    sink.emit(
+        Notification(
+            kind=NotificationKind.PROGRESS,
+            env_id="run-bbbb2222",
+            message="[run-bbbb2222] Progreso: 1/3 (33%)",
+        )
+    )
+    assert buf.getvalue() == ""
+    assert len(sink.recent()) == 1
+
+
+def test_set_policy_print_reactiva_progreso_en_caliente():
+    # set_policy(PRINT) sigue permitiendo volver al modo ruidoso (base de un
+    # futuro `notify level`/`--verbose`).
+    sink, buf = _sink_with_buffer()
+    sink.set_policy(NotificationKind.PROGRESS, NotificationPolicy.PRINT)
     sink.emit(
         Notification(
             kind=NotificationKind.PROGRESS,

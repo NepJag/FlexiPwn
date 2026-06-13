@@ -18,6 +18,7 @@ class NotificationKind(str, Enum):
     SSH_READY = "ssh_ready"
     TARGET_MATCHED = "target_matched"
     PROGRESS = "progress"
+    RUN_COMPLETED = "run_completed"
 
 
 class NotificationPolicy(str, Enum):
@@ -42,12 +43,22 @@ class Notification:
 
 
 # Política por defecto.
-# El "SSH listo" no ensucia el TTY compartido del educador; la
-# credencial igual queda en la tabla final del batch, en `run show` y en log.
+# Todo se silencia: el educador ya NO recibe los eventos intercalados sobre el
+# prompt. La vista pasa a ser pull/snapshot vía los comandos `dashboard` y
+# `feed` (que leen de la DB), con un badge de novedades en el prompt. Esto
+# evita que una prueba de estrés con decenas de entornos avanzando en paralelo
+# le ensucie el TTY compartido.
+#   - SSH_READY: la credencial queda en `run show`, en la tabla del batch y en log.
+#   - TARGET_MATCHED / PROGRESS: su equivalente persistente está en
+#     TargetResult.matched_at / ExerciseRun.progress, que es lo que leen el
+#     feed y el dashboard.
+# `set_policy(kind, PRINT)` permite reactivar la impresión en caliente (base de
+# un futuro `notify level` / `--verbose` si se quiere volver al modo ruidoso).
 _DEFAULT_POLICY: dict[NotificationKind, NotificationPolicy] = {
     NotificationKind.SSH_READY: NotificationPolicy.SILENCE,
-    NotificationKind.TARGET_MATCHED: NotificationPolicy.PRINT,
-    NotificationKind.PROGRESS: NotificationPolicy.PRINT,
+    NotificationKind.TARGET_MATCHED: NotificationPolicy.SILENCE,
+    NotificationKind.PROGRESS: NotificationPolicy.SILENCE,
+    NotificationKind.RUN_COMPLETED: NotificationPolicy.SILENCE,
 }
 
 
@@ -101,11 +112,18 @@ class NotificationSink:
             self._policy[kind] = policy
 
     def recent(self, limit: int | None = None) -> list[Notification]:
-        """Devuelve las notificaciones más recientes (base del feed)."""
+        """Devuelve las notificaciones más recientes del buffer en memoria.
+
+        VESTIGIAL: el feed/dashboard del educador se construyó leyendo de la DB
+        (TargetResult/ExerciseRun), no de este buffer, porque persiste y
+        sobrevive reinicios del daemon. Se conserva por si hace falta un camino
+        rápido en memoria, pero hoy no tiene consumidor.
+        """
         with self._lock:
             items = list(self._buffer)
         return items[-limit:] if limit else items
 
     def clear(self) -> None:
+        """VESTIGIAL: ver `recent()`. Sin consumidor actual."""
         with self._lock:
             self._buffer.clear()

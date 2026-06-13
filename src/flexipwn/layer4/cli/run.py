@@ -30,6 +30,14 @@ console = Console()
 DAEMON_CRED_TIMEOUT_SECONDS = 30
 BATCH_CRED_TIMEOUT_SECONDS = 60
 
+# Color Rich por estado de run. Fuente única para run_list, run_show y el
+# dashboard.
+_STATUS_COLORS = {
+    "completed": "green", "failed": "red", "timeout": "red",
+    "stopped": "yellow", "running": "cyan", "pending": "dim",
+    "stopping": "yellow", "resetting": "yellow",
+}
+
 
 class ProvisionError(Exception):
     """Falla al aprovisionar un entorno.
@@ -625,16 +633,11 @@ def run_list(
     table.add_column("Progreso")
     table.add_column("Puerto SSH")
     table.add_column("Inicio")
-    _colors = {
-        "completed": "green", "failed": "red", "timeout": "red",
-        "stopped": "yellow", "running": "cyan", "pending": "dim",
-        "stopping": "yellow", "resetting": "yellow",
-    }
     for r in rows:
         pct = f"{int((r['progress'] or 0) * 100)}%"
         inicio = str(r["started_at"])[:19] if r["started_at"] else "—"
         port = str(r["attacker_ssh_port"]) if r["attacker_ssh_port"] else "—"
-        color = _colors.get(r["status"], "white")
+        color = _STATUS_COLORS.get(r["status"], "white")
         table.add_row(
             r["env_id"],
             r["scenario_title"],
@@ -659,12 +662,7 @@ def run_show(env_id: str = typer.Argument(..., help="env_id del run")) -> None:
         participant = session.get(Participant, run.participant_id)
         targets = repository.get_target_results_by_run(session, run.id)
 
-    _colors = {
-        "completed": "green", "running": "cyan", "pending": "dim",
-        "failed": "red", "timeout": "red", "stopped": "yellow",
-        "stopping": "yellow", "resetting": "yellow",
-    }
-    color = _colors.get(run.status, "white")
+    color = _STATUS_COLORS.get(run.status, "white")
 
     ssh_lines = ""
     if run.attacker_ssh_username and run.attacker_ssh_password and run.attacker_ssh_port:
@@ -745,3 +743,85 @@ def run_progress(env_id: str = typer.Argument(..., help="env_id del run")) -> No
         console.print(f"  {marker} [cyan]{t.target_type}[/cyan]: {t.description}{when}")
 
     console.print(f"\n[bold]Progreso: {len(matched)}/{total} ({pct}%)[/bold]")
+
+
+# ---------------------------------------------------------------------------
+# Dashboard + feed (vista del educador para muchos entornos a la vez).
+# Reemplazan los prints intercalados de TARGET_MATCHED/PROGRESS, ahora
+# silenciados en el NotificationSink. Leen de la DB. (Colores: _STATUS_COLORS,
+# definido arriba como fuente única.)
+# ---------------------------------------------------------------------------
+
+
+def dashboard_view(all_runs: bool = False) -> None:
+    """Tabla de estado: una fila por entorno (x/y, %, último hito)."""
+    with get_session() as session:
+        rows = repository.dashboard_rows(session, include_finished=all_runs)
+
+    if not rows:
+        scope = "entornos hoy" if all_runs else "entornos activos"
+        console.print(f"[dim]No hay {scope}.[/dim]")
+        return
+
+    title = "Dashboard" + (" (incluye terminados hoy)" if all_runs else " (activos)")
+    table = Table(title=title, show_header=True)
+    table.add_column("env_id", style="cyan", no_wrap=True)
+    table.add_column("Escenario")
+    table.add_column("Participante")
+    table.add_column("Estado")
+    table.add_column("Objetivos", justify="right")
+    table.add_column("%", justify="right")
+    table.add_column("Último hito")
+    for r in rows:
+        color = _STATUS_COLORS.get(r["status"], "white")
+        pct = int((r["matched"] / r["total"]) * 100) if r["total"] else 0
+        objetivos = f"{r['matched']}/{r['total']}"
+        if r["last_desc"]:
+            hora = str(r["last_at"])[11:19] if r["last_at"] else ""
+            ultimo = f"[dim]{hora}[/dim] {r['last_desc']}" if hora else r["last_desc"]
+        else:
+            ultimo = "[dim]—[/dim]"
+        table.add_row(
+            r["env_id"],
+            r["scenario_title"],
+            r["participant_username"],
+            f"[{color}]{r['status']}[/{color}]",
+            objetivos,
+            f"{pct}%",
+            ultimo,
+        )
+    console.print(table)
+
+
+def feed_view(all_history: bool = False) -> None:
+    """Feed cronológico persistente cruzando entornos.
+
+    Log agnóstico al estado del run: los hitos quedan aunque el run termine.
+    Incluye una entrada propia cuando un escenario se completa. Por defecto solo
+    hoy; ``all_history`` muestra todo el historial.
+    """
+    with get_session() as session:
+        items = repository.feed_milestones(
+            session, all_history=all_history, limit=None if all_history else 40
+        )
+
+    if not items:
+        console.print("[dim]Sin hitos todavía.[/dim]")
+        return
+
+    header = "Feed de objetivos" + (" (historial completo)" if all_history else " (hoy)")
+    console.print(f"[bold]{header}[/bold]\n")
+    for it in items:
+        hora = str(it["at"])[11:19] if it["at"] else "--:--:--"
+        env = it["env_id"]
+        part = it["participant_username"]
+        if it["kind"] == "scenario_completed":
+            console.print(
+                f"[dim]{hora}[/dim] [bold green]✓ ESCENARIO COMPLETADO[/bold green] "
+                f"[cyan]{env}[/cyan] [dim]({part})[/dim]"
+            )
+        else:
+            console.print(
+                f"[dim]{hora}[/dim] [green]✓[/green] "
+                f"[cyan]{env}[/cyan] [dim]({part})[/dim] {it['description']}"
+            )

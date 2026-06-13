@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -146,6 +147,8 @@ Comandos disponibles:
   run watch <env_id>                  — eventos en tiempo real (Ctrl+C sale)
   run batch-start <yaml>              — crea runs masivos desde YAML
 
+  dashboard [--all]                   — estado de entornos activos (--all: + terminados hoy)
+  feed [--all]                        — registro de hitos cumplidos (hoy; --all: historial)
   daemon status                       — runs activos en este daemon
 
   clear                               — limpia la pantalla
@@ -175,6 +178,8 @@ _COMPLETION_COMMANDS = (
     "run progress",
     "run watch",
     "run batch-start",
+    "dashboard",
+    "feed",
     "daemon status",
     "exit",
     "quit",
@@ -211,6 +216,29 @@ def build_repl_completer() -> Completer:
     return NestedCompleter.from_nested_dict(tree)
 
 
+# --------------------------------------------------------------------------
+# Badge de novedades del prompt (compartido por el REPL foreground y el
+# cliente attach). Lee de la DB la cantidad de hitos posteriores al cursor de
+# última lectura y los entornos activos. Pensado para `bottom_toolbar` de
+# prompt_toolkit con `refresh_interval`, que repinta sin romper el prompt.
+# --------------------------------------------------------------------------
+
+def feed_badge_text(cursor: datetime) -> str:
+    try:
+        with get_session() as session:
+            nuevas = repository.count_new_milestones(session, cursor)
+            activos = repository.count_active_envs(session)
+    except Exception:
+        return ""
+    nov = f"▲ {nuevas} nuevas" if nuevas else "sin novedades"
+    return f" {nov} · {activos} entornos activos · feed para ver "
+
+
+def is_feed_command(line: str) -> bool:
+    """True si la línea abre el feed (entonces el cursor se avanza a ahora)."""
+    return line == "feed" or line.startswith("feed ")
+
+
 class FlexiPwnREPL:
     """REPL interactivo in-process. Comparte estado (DB) con el DaemonLoop."""
 
@@ -242,6 +270,10 @@ class FlexiPwnREPL:
         # Orden por longitud descendente para que "run batch-start" matchee
         # antes de "run" o "run start".
         self._dispatch_order = sorted(self.handlers, key=len, reverse=True)
+        # Cursor de "última lectura" del feed, por cliente/instancia y en
+        # memoria (decisión: consumo no-destructivo). El badge cuenta los
+        # hitos posteriores a este timestamp; abrir `feed` lo avanza a ahora.
+        self._feed_cursor: datetime = datetime.now(UTC)
 
     # ------------------------------------------------------------------
     # Handler registry
@@ -267,6 +299,8 @@ class FlexiPwnREPL:
             "run progress": self._cmd_run_progress,
             "run watch": self._cmd_run_watch,
             "run batch-start": self._cmd_run_batch_start,
+            "dashboard": self._cmd_dashboard,
+            "feed": self._cmd_feed,
             "daemon status": self._cmd_daemon_status,
         }
 
@@ -285,7 +319,11 @@ class FlexiPwnREPL:
             with patch_stdout(raw=True):
                 while True:
                     try:
-                        text = self.session.prompt("flexipwn> ")
+                        text = self.session.prompt(
+                            "flexipwn> ",
+                            bottom_toolbar=lambda: feed_badge_text(self._feed_cursor),
+                            refresh_interval=2.0,
+                        )
                     except KeyboardInterrupt:
                         continue            # Ctrl+C cancela la línea
                     except EOFError:
@@ -296,6 +334,10 @@ class FlexiPwnREPL:
                     if stripped in ("exit", "quit"):
                         break
                     self.dispatch_line(stripped)
+                    # Abrir el feed marca todo lo previo como leído (cursor
+                    # en memoria, no destructivo: otros clientes no se afectan).
+                    if is_feed_command(stripped):
+                        self._feed_cursor = datetime.now(UTC)
         finally:
             self.console.print("[yellow]Saliendo del REPL...[/yellow]")
             if self.stop_loop_on_exit:
@@ -474,6 +516,18 @@ class FlexiPwnREPL:
             return
         from flexipwn.layer4.cli.run import run_progress
         run_progress(args[0])
+
+    @staticmethod
+    def _wants_all(args: list[str]) -> bool:
+        return any(a in ("--all", "all", "-a") for a in args)
+
+    def _cmd_dashboard(self, args: list[str]) -> None:
+        from flexipwn.layer4.cli.run import dashboard_view
+        dashboard_view(all_runs=self._wants_all(args))
+
+    def _cmd_feed(self, args: list[str]) -> None:
+        from flexipwn.layer4.cli.run import feed_view
+        feed_view(all_history=self._wants_all(args))
 
     def _cmd_run_watch(self, args: list[str]) -> None:
         if len(args) != 1:

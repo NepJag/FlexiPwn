@@ -28,6 +28,7 @@ import socketserver
 import sys
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO
 
@@ -320,7 +321,11 @@ def attach_client(sock_path: Path) -> None:
 
     El thread principal maneja prompt_toolkit y serializa los PROMPTs del wizard.
     """
-    from flexipwn.layer4.core.repl import build_repl_completer
+    from flexipwn.layer4.core.repl import (
+        build_repl_completer,
+        feed_badge_text,
+        is_feed_command,
+    )
 
     history_path = Path.home() / ".flexipwn" / "history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -329,6 +334,10 @@ def attach_client(sock_path: Path) -> None:
         completer=build_repl_completer(),
         complete_while_typing=False,
     )
+    # Cursor de "última lectura" del feed, local a este cliente attach (en
+    # memoria, no destructivo). El badge lee la DB directamente: el cliente
+    # corre en el mismo host que el daemon y abre el mismo SQLite.
+    feed_cursor: list[datetime] = [datetime.now(UTC)]
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(str(sock_path))
@@ -389,7 +398,11 @@ def attach_client(sock_path: Path) -> None:
 
             while not eof_event.is_set():
                 try:
-                    text = session.prompt("flexipwn> ")
+                    text = session.prompt(
+                        "flexipwn> ",
+                        bottom_toolbar=lambda: feed_badge_text(feed_cursor[0]),
+                        refresh_interval=2.0,
+                    )
                 except KeyboardInterrupt:
                     continue
                 except EOFError:
@@ -411,6 +424,9 @@ def attach_client(sock_path: Path) -> None:
                         end_event.wait(timeout=0.05)
                 # Drain final por si llegó un PROMPT en la última ventana.
                 _handle_pending_prompts()
+                # Abrir el feed marca lo previo como leído (cursor local).
+                if is_feed_command(stripped):
+                    feed_cursor[0] = datetime.now(UTC)
 
             if eof_event.is_set():
                 print("[attach] el daemon cerró la conexión.")
