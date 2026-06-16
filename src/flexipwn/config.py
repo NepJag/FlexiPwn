@@ -20,3 +20,8 @@ class FlexiPwnConfig:
     host: str = field(default_factory=_default_host)
     attacker_port_range_start: int = 2200
     attacker_port_range_end: int = 2299
+    # Interfaz donde el contenedor atacante publica su SSH.
+    #   None  → todas las interfaces (comportamiento por defecto, dev/local).
+    #   "IP"  → publica solo en esa IP: la LAN del DCC o la overlay netbird,
+    #           nunca en la IP pública. Evita exponer el SSH a toda la red.
+    attacker_bind_ip: str | None = None

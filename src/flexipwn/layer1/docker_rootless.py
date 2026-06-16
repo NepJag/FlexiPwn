@@ -372,17 +372,31 @@ class DockerRootlessProvider(EnvironmentProvider):
                 log_volumes[str(host_log_dir)] = {"bind": container_dir, "mode": "rw"}
 
             # 1c. Parsear ports ["host:container"] → {container_port/tcp: host_port}
-            def _parse_port_bindings(specs: list[str] | None) -> dict[str, int]:
-                bindings: dict[str, int] = {}
+            #     Con bind_ip se publica en una sola interfaz:
+            #       {container_port/tcp: (bind_ip, host_port)}
+            #     docker-py acepta tanto el int (todas las interfaces) como la
+            #     tupla (ip, puerto) para fijar la interfaz de publicación.
+            def _parse_port_bindings(
+                specs: list[str] | None,
+                bind_ip: str | None = None,
+            ) -> dict[str, int | tuple[str, int]]:
+                bindings: dict[str, int | tuple[str, int]] = {}
                 for port_spec in (specs or []):
                     parts = port_spec.split(":")
                     if len(parts) == 2:
                         host_port, container_port = parts
-                        bindings[f"{container_port}/tcp"] = int(host_port)
+                        bindings[f"{container_port}/tcp"] = (
+                            (bind_ip, int(host_port)) if bind_ip else int(host_port)
+                        )
                 return bindings
 
+            # El vulnerable no publica nada; el atacante publica su SSH solo en
+            # la interfaz elegida (LAN del DCC o la overlay netbird), nunca en la
+            # IP pública. attacker_bind_ip=None mantiene el comportamiento actual.
             port_bindings = _parse_port_bindings(ports)
-            attacker_port_bindings = _parse_port_bindings(attacker_ports)
+            attacker_port_bindings = _parse_port_bindings(
+                attacker_ports, bind_ip=self.config.attacker_bind_ip
+            )
 
             # 2. Redes (interna para vuln↔attacker, externa para attacker↔host)
             internal_net_name, external_net_name = self._create_network(env_id)
