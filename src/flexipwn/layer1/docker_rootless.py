@@ -378,24 +378,27 @@ class DockerRootlessProvider(EnvironmentProvider):
             #     tupla (ip, puerto) para fijar la interfaz de publicación.
             def _parse_port_bindings(
                 specs: list[str] | None,
-                bind_ip: str | None = None,
-            ) -> dict[str, int | tuple[str, int]]:
-                bindings: dict[str, int | tuple[str, int]] = {}
+                bind_ips: list[str] | None = None,
+            ) -> dict[str, int | list[tuple[str, int]]]:
+                bindings: dict[str, int | list[tuple[str, int]]] = {}
                 for port_spec in (specs or []):
                     parts = port_spec.split(":")
                     if len(parts) == 2:
                         host_port, container_port = parts
-                        bindings[f"{container_port}/tcp"] = (
-                            (bind_ip, int(host_port)) if bind_ip else int(host_port)
-                        )
+                        key = f"{container_port}/tcp"
+                        if bind_ips:
+                            # Mismo puerto publicado en cada interfaz indicada.
+                            bindings[key] = [(ip, int(host_port)) for ip in bind_ips]
+                        else:
+                            bindings[key] = int(host_port)
                 return bindings
 
             # El vulnerable no publica nada; el atacante publica su SSH solo en
-            # la interfaz elegida (LAN del DCC o la overlay netbird), nunca en la
-            # IP pública. attacker_bind_ip=None mantiene el comportamiento actual.
+            # las interfaces elegidas (IP del DCC y/o la overlay netbird wt0),
+            # nunca en la IP pública. attacker_bind_ips=None = todas (dev/local).
             port_bindings = _parse_port_bindings(ports)
             attacker_port_bindings = _parse_port_bindings(
-                attacker_ports, bind_ip=self.config.attacker_bind_ip
+                attacker_ports, bind_ips=self.config.attacker_bind_ips
             )
 
             # 2. Redes (interna para vuln↔attacker, externa para attacker↔host)
