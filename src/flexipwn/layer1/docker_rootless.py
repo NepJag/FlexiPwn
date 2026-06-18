@@ -372,17 +372,34 @@ class DockerRootlessProvider(EnvironmentProvider):
                 log_volumes[str(host_log_dir)] = {"bind": container_dir, "mode": "rw"}
 
             # 1c. Parsear ports ["host:container"] → {container_port/tcp: host_port}
-            def _parse_port_bindings(specs: list[str] | None) -> dict[str, int]:
-                bindings: dict[str, int] = {}
+            #     Con bind_ip se publica en una sola interfaz:
+            #       {container_port/tcp: (bind_ip, host_port)}
+            #     docker-py acepta tanto el int (todas las interfaces) como la
+            #     tupla (ip, puerto) para fijar la interfaz de publicación.
+            def _parse_port_bindings(
+                specs: list[str] | None,
+                bind_ips: list[str] | None = None,
+            ) -> dict[str, int | list[tuple[str, int]]]:
+                bindings: dict[str, int | list[tuple[str, int]]] = {}
                 for port_spec in (specs or []):
                     parts = port_spec.split(":")
                     if len(parts) == 2:
                         host_port, container_port = parts
-                        bindings[f"{container_port}/tcp"] = int(host_port)
+                        key = f"{container_port}/tcp"
+                        if bind_ips:
+                            # Mismo puerto publicado en cada interfaz indicada.
+                            bindings[key] = [(ip, int(host_port)) for ip in bind_ips]
+                        else:
+                            bindings[key] = int(host_port)
                 return bindings
 
+            # El vulnerable no publica nada; el atacante publica su SSH solo en
+            # las interfaces elegidas (IP del DCC y/o la overlay netbird wt0),
+            # nunca en la IP pública. attacker_bind_ips=None = todas (dev/local).
             port_bindings = _parse_port_bindings(ports)
-            attacker_port_bindings = _parse_port_bindings(attacker_ports)
+            attacker_port_bindings = _parse_port_bindings(
+                attacker_ports, bind_ips=self.config.attacker_bind_ips
+            )
 
             # 2. Redes (interna para vuln↔attacker, externa para attacker↔host)
             internal_net_name, external_net_name = self._create_network(env_id)
