@@ -4,6 +4,7 @@ import csv
 import json
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
@@ -20,6 +21,11 @@ from flexipwn.layer1.provider import ImageNotFoundError
 from flexipwn.layer3.schema import scenario_requires_network_capture
 from flexipwn.layer4.cli.daemon import require_daemon
 from flexipwn.layer4.core.port_allocator import find_free_port
+from flexipwn.layer4.core.run_timing import (
+    compute_run_timing,
+    duration_between,
+    format_duration,
+)
 from flexipwn.layer4.db import repository
 from flexipwn.layer4.db.models import ExerciseRun, Participant
 from flexipwn.layer4.db.session import get_session
@@ -699,6 +705,62 @@ def run_show(env_id: str = typer.Argument(..., help="env_id del run")) -> None:
     if "actual" in groups:
         _print_target_table("Intento actual", groups["actual"], previous=False)
 
+    _print_timing(run, targets)
+
+
+def _print_timing(run, targets: list) -> None:
+    """Sección de tiempos del intento actual: resumen + tabla por etapa.
+
+    Deriva todo de los timestamps ya persistidos (started_at/finished_at +
+    matched_at por hoja). Columnas por objetivo cumplido: 'Desde inicio'
+    (matched_at - started_at) y 'Δ etapa' (contra el hito cronológico anterior).
+    """
+    timing = compute_run_timing(
+        run.started_at, run.finished_at, run.status == "completed", targets
+    )
+    if timing.started_at is None:
+        console.print("\n[dim]Sin datos de tiempo (run aún no iniciado).[/dim]")
+        return
+
+    if timing.finished_at is not None:
+        dur_label, dur_val = "Total", format_duration(timing.total_seconds)
+        estado = (
+            "completado" if timing.completed else "parcial (terminó sin completar)"
+        )
+    else:
+        dur_label, dur_val = "Transcurrido", format_duration(timing.elapsed_seconds)
+        estado = "en curso"
+
+    console.print(
+        f"\n[bold]Tiempos[/bold]   "
+        f"[dim]{dur_label}:[/dim] {dur_val}   "
+        f"[dim]Al primer objetivo:[/dim] "
+        f"{format_duration(timing.time_to_first_seconds)}   "
+        f"[dim]Estado:[/dim] {estado}"
+    )
+
+    if timing.milestones:
+        table = Table(title="Tiempo por etapa", show_header=True)
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Objetivo", style="cyan")
+        table.add_column("Hora", style="dim")
+        table.add_column("Desde inicio", justify="right")
+        table.add_column("Δ etapa", justify="right")
+        for m in timing.milestones:
+            table.add_row(
+                str(m.target_index + 1),
+                m.description,
+                str(m.matched_at)[11:19],
+                format_duration(m.since_start),
+                format_duration(m.delta_prev),
+            )
+        console.print(table)
+
+    if timing.pending:
+        console.print(
+            f"[dim]Objetivos pendientes (sin alcanzar):[/dim] {len(timing.pending)}"
+        )
+
 
 def _print_target_table(title: str, targets: list, *, previous: bool) -> None:
     table = Table(title=title, show_header=True)
@@ -771,11 +833,18 @@ def dashboard_view(all_runs: bool = False) -> None:
     table.add_column("Estado")
     table.add_column("Objetivos", justify="right")
     table.add_column("%", justify="right")
+    table.add_column("Tiempo", justify="right")
     table.add_column("Último hito")
+    now = datetime.now(UTC)
     for r in rows:
         color = _STATUS_COLORS.get(r["status"], "white")
         pct = int((r["matched"] / r["total"]) * 100) if r["total"] else 0
         objetivos = f"{r['matched']}/{r['total']}"
+        # Tiempo transcurrido (activo) o total (terminado): (finished_at o now) -
+        # started_at. Mismo criterio de duración que la sección de run show.
+        tiempo = format_duration(
+            duration_between(r.get("started_at"), r.get("finished_at"), now)
+        )
         if r["last_desc"]:
             hora = str(r["last_at"])[11:19] if r["last_at"] else ""
             ultimo = f"[dim]{hora}[/dim] {r['last_desc']}" if hora else r["last_desc"]
@@ -788,6 +857,7 @@ def dashboard_view(all_runs: bool = False) -> None:
             f"[{color}]{r['status']}[/{color}]",
             objetivos,
             f"{pct}%",
+            tiempo,
             ultimo,
         )
     console.print(table)

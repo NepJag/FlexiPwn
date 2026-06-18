@@ -576,6 +576,7 @@ def dashboard_rows(session: Session, *, include_finished: bool = False) -> list[
                 "last_desc": last.description if last else None,
                 "last_at": last.matched_at if last else None,
                 "started_at": run.started_at,
+                "finished_at": run.finished_at,
             }
         )
     # Activos primero, luego por progreso descendente.
