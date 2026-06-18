@@ -72,6 +72,19 @@ def parse_scenario_config(scenario: Scenario) -> ScenarioConfig:
     return ScenarioConfig.model_validate(raw)
 
 
+def delete_scenario(session: Session, scenario_id: str | uuid.UUID) -> None:
+    """Borra la definición de un escenario.
+
+    Asume que sus runs ya fueron eliminados (no hay cascade en los modelos):
+    el comando `scenario remove` borra primero los runs terminales con
+    `delete_run` y recién después llama aquí.
+    """
+    scenario = get_scenario(session, scenario_id)
+    if scenario is not None:
+        session.delete(scenario)
+        session.commit()
+
+
 # ---------------------------------------------------------------------------
 # Participant
 # ---------------------------------------------------------------------------
@@ -324,6 +337,52 @@ def delete_run(session: Session, run_id: uuid.UUID) -> None:
     if run is not None:
         session.delete(run)
     session.commit()
+
+
+def _delete_all_run_activity(session: Session) -> dict[str, int]:
+    """Borra toda la actividad de runs (RunEvent, TargetResult, ExerciseRun)
+    SIN commitear. Base común de los dos reset-all del laboratorio; cada uno
+    completa la transacción tras borrar también escenarios o participantes.
+    """
+    events = list(session.exec(select(RunEvent)).all())
+    targets = list(session.exec(select(TargetResult)).all())
+    runs = list(session.exec(select(ExerciseRun)).all())
+    for row in (*events, *targets, *runs):
+        session.delete(row)
+    return {"events": len(events), "targets": len(targets), "runs": len(runs)}
+
+
+def reset_all_keep_participants(session: Session) -> dict[str, int]:
+    """Wipe total conservando participantes — `scenario reset-all` (decisión 1.B).
+
+    Borra RunEvent, TargetResult, ExerciseRun y Scenario; NO toca Participant.
+    El teardown de los contenedores Docker NO ocurre aquí: lo hace el daemon (al
+    marcar los runs activos como 'stopping') más un barrido final idempotente
+    de `provider.cleanup_all()`. Devuelve conteos de lo borrado para el reporte.
+    """
+    counts = _delete_all_run_activity(session)
+    scenarios = list(session.exec(select(Scenario)).all())
+    for scenario in scenarios:
+        session.delete(scenario)
+    session.commit()
+    counts["scenarios"] = len(scenarios)
+    return counts
+
+
+def reset_all_keep_scenarios(session: Session) -> dict[str, int]:
+    """Wipe total conservando escenarios — `participant reset-all` (1.5).
+
+    Espejo de `reset_all_keep_participants`: borra RunEvent, TargetResult,
+    ExerciseRun y Participant; NO toca Scenario. Mismo teardown mediado por el
+    daemon + barrido final. Devuelve conteos de lo borrado para el reporte.
+    """
+    counts = _delete_all_run_activity(session)
+    participants = list(session.exec(select(Participant)).all())
+    for participant in participants:
+        session.delete(participant)
+    session.commit()
+    counts["participants"] = len(participants)
+    return counts
 
 
 # ---------------------------------------------------------------------------

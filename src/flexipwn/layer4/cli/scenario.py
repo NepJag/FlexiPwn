@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from flexipwn.config import FlexiPwnConfig
+from flexipwn.layer1.docker_rootless import DockerRootlessProvider
 from flexipwn.layer4.db import repository
 from flexipwn.layer4.db.session import get_session
 from flexipwn.layer3.schema import load_scenario
@@ -125,4 +128,103 @@ def scenario_validate(yaml_path: str = typer.Argument(..., help="Ruta al archivo
     console.print(
         f"[green]✓ YAML válido[/green] — {config.title!r} "
         f"({len(config.targets)} targets, condición: {config.condition})"
+    )
+
+
+# Limpieza por el educador
+#
+# `confirm` se inyecta para abstraer la única diferencia entre frontends:
+# typer.confirm/typer.prompt en la CLI standalone vs. el prompter del
+# REPL/socket. Mismo patrón que `run._perform_run_removal`.
+# ---------------------------------------------------------------------------
+
+
+def _perform_scenario_removal(
+    scenario_id: str, confirm: Callable[[str], bool]
+) -> bool:
+    """Guard + teardown + borrado en DB de un escenario y sus runs terminales.
+
+    Política guard: rechaza si el escenario tiene runs no
+    terminales; el educador debe detenerlos con `run stop` antes. Cuando todos
+    son terminales, destruye contenedores residuales, borra los
+    runs y finalmente la definición del escenario. Devuelve True si se eliminó.
+    """
+    with get_session() as session:
+        try:
+            scenario = repository.get_scenario(session, scenario_id)
+        except ValueError:
+            console.print(f"[red]ID de escenario inválido:[/red] {scenario_id}")
+            return False
+        if scenario is None:
+            console.print(f"[red]Escenario no encontrado:[/red] {scenario_id}")
+            return False
+        sid = scenario.id
+        title = scenario.title
+        runs = repository.list_runs(session, scenario_id=sid)
+        non_terminal = [
+            r for r in runs if r.status not in repository.TERMINAL_STATUSES
+        ]
+        run_snaps = [(r.id, r.env_id) for r in runs]
+
+    if non_terminal:
+        envs = ", ".join(f"{r.env_id} ({r.status})" for r in non_terminal)
+        console.print(
+            f"[red]El escenario {title!r} tiene runs activos:[/red] {envs}\n"
+            f"Detenlos con [yellow]run stop <env_id>[/yellow] antes de eliminar "
+            f"el escenario."
+        )
+        return False
+
+    if not confirm(
+        f"¿Eliminar escenario {title!r} y sus {len(run_snaps)} run(s) "
+        f"terminal(es)? Borra DB y contenedores."
+    ):
+        console.print("[dim]Cancelado.[/dim]")
+        return False
+
+    provider = DockerRootlessProvider(config=FlexiPwnConfig())
+    for run_id, env_id in run_snaps:
+        # Teardown defensivo: en estado terminal el daemon ya destruyó el
+        # entorno, pero destroy() es idempotente y limpia cualquier residuo.
+        try:
+            provider.destroy(env_id)
+        except Exception as exc:
+            console.print(f"[yellow]Aviso al destruir {env_id}:[/yellow] {exc}")
+        with get_session() as session:
+            repository.delete_run(session, run_id)
+
+    with get_session() as session:
+        repository.delete_scenario(session, sid)
+    console.print(
+        f"[green]Escenario {title!r} eliminado[/green] "
+        f"(definición + {len(run_snaps)} run(s) + contenedores)."
+    )
+    return True
+
+
+@app.command("remove")
+def scenario_remove(
+    scenario_id: str = typer.Argument(..., help="UUID del escenario"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="No pedir confirmación."),
+) -> None:
+    """Elimina un escenario y sus runs terminales (DB + contenedores).
+
+    Rechaza si el escenario tiene runs activos: detenlos con `run stop` antes.
+    """
+    _perform_scenario_removal(
+        scenario_id, confirm=lambda msg: yes or typer.confirm(msg)
+    )
+
+
+@app.command("reset-all")
+def scenario_reset_all() -> None:
+    """Limpia TODO el laboratorio (runs + escenarios), conserva participantes.
+
+    Acción destructiva: la confirmación (escribir BORRAR) no es saltable, no
+    hay flag `--yes`.
+    """
+    from flexipwn.layer4.cli.cleanup import _perform_reset_all
+
+    _perform_reset_all(
+        confirm=lambda msg: typer.prompt(msg) == "BORRAR", mode="scenario"
     )

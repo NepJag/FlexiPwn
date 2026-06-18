@@ -97,3 +97,18 @@ def participant_remove(
         repository.delete_participant(session, participant_id)
 
     console.print(f"[green]Participante {username} eliminado.[/green]")
+
+
+@app.command("reset-all")
+def participant_reset_all() -> None:
+    """Limpia TODO el laboratorio (runs + participantes), conserva escenarios.
+
+    Mismo flujo que `scenario reset-all` (mediado por el daemon), pero conserva
+    los escenarios. Acción destructiva: la confirmación (escribir BORRAR) no es
+    saltable, no hay flag `--yes`.
+    """
+    from flexipwn.layer4.cli.cleanup import _perform_reset_all
+
+    _perform_reset_all(
+        confirm=lambda msg: typer.prompt(msg) == "BORRAR", mode="participant"
+    )

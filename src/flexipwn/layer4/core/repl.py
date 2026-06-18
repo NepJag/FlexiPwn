@@ -74,12 +74,13 @@ def _install_console_proxies() -> None:
     with _install_lock:
         if _proxies_installed:
             return
+        from flexipwn.layer4.cli import cleanup as cleanup_mod
         from flexipwn.layer4.cli import daemon as daemon_mod
         from flexipwn.layer4.cli import participant as participant_mod
         from flexipwn.layer4.cli import run as run_mod
         from flexipwn.layer4.cli import scenario as scenario_mod
 
-        for mod in (scenario_mod, participant_mod, run_mod, daemon_mod):
+        for mod in (scenario_mod, participant_mod, run_mod, daemon_mod, cleanup_mod):
             if not isinstance(mod.console, _ConsoleProxy):
                 mod.console = _ConsoleProxy(mod.console)
         _proxies_installed = True
@@ -131,11 +132,14 @@ Comandos disponibles:
   scenario list                       — lista escenarios cargados
   scenario load <yaml>                — carga un escenario YAML
   scenario show <id>                  — detalle de un escenario
+  scenario remove <id> [--yes]        — elimina un escenario terminal (definición + runs + contenedores)
+  scenario reset-all                  — limpia TODO el laboratorio (conserva participantes)
 
   participant add                     — crea un participante
   participant list                    — lista participantes
   participant reset-password <user>   — genera nueva contraseña
   participant remove <username>       — elimina (si no tiene runs activos)
+  participant reset-all               — limpia TODO el laboratorio (conserva escenarios)
 
   run start                           — wizard: elige escenario + participante
   run stop <env_id>                   — detiene un run y destruye su entorno
@@ -165,10 +169,13 @@ _COMPLETION_COMMANDS = (
     "scenario list",
     "scenario load",
     "scenario show",
+    "scenario remove",
+    "scenario reset-all",
     "participant add",
     "participant list",
     "participant remove",
     "participant reset-password",
+    "participant reset-all",
     "run start",
     "run stop",
     "run reset",
@@ -286,10 +293,13 @@ class FlexiPwnREPL:
             "scenario list": self._cmd_scenario_list,
             "scenario load": self._cmd_scenario_load,
             "scenario show": self._cmd_scenario_show,
+            "scenario remove": self._cmd_scenario_remove,
+            "scenario reset-all": self._cmd_scenario_reset_all,
             "participant add": self._cmd_participant_add,
             "participant list": self._cmd_participant_list,
             "participant remove": self._cmd_participant_remove,
             "participant reset-password": self._cmd_participant_reset_password,
+            "participant reset-all": self._cmd_participant_reset_all,
             "run start": self._cmd_run_start,
             "run stop": self._cmd_run_stop,
             "run reset": self._cmd_run_reset,
@@ -392,6 +402,31 @@ class FlexiPwnREPL:
         from flexipwn.layer4.cli.scenario import scenario_show
         scenario_show(args[0])
 
+    @staticmethod
+    def _wants_yes(args: list[str]) -> bool:
+        return any(a in ("--yes", "-y") for a in args)
+
+    def _cmd_scenario_remove(self, args: list[str]) -> None:
+        yes = self._wants_yes(args)
+        positional = [a for a in args if not a.startswith("-")]
+        if len(positional) != 1:
+            self.console.print("[red]Uso:[/red] scenario remove <id> [--yes]")
+            return
+        from flexipwn.layer4.cli.scenario import _perform_scenario_removal
+        _perform_scenario_removal(
+            positional[0],
+            confirm=lambda msg: yes
+            or self._prompter(f"{msg} [y/N] ").strip().lower() in ("y", "yes"),
+        )
+
+    def _cmd_scenario_reset_all(self, args: list[str]) -> None:
+        # Acción destructiva: confirmación NO saltable (sin --yes).
+        from flexipwn.layer4.cli.cleanup import _perform_reset_all
+        _perform_reset_all(
+            confirm=lambda msg: self._prompter(f"{msg}: ").strip() == "BORRAR",
+            mode="scenario",
+        )
+
     def _cmd_participant_add(self, args: list[str]) -> None:
         from flexipwn.layer4.cli.participant import participant_add
         participant_add()
@@ -408,6 +443,14 @@ class FlexiPwnREPL:
             return
         from flexipwn.layer4.cli.participant import participant_reset_password
         participant_reset_password(args[0])
+
+    def _cmd_participant_reset_all(self, args: list[str]) -> None:
+        # Acción destructiva: confirmación NO saltable (sin --yes).
+        from flexipwn.layer4.cli.cleanup import _perform_reset_all
+        _perform_reset_all(
+            confirm=lambda msg: self._prompter(f"{msg}: ").strip() == "BORRAR",
+            mode="participant",
+        )
 
     def _cmd_participant_remove(self, args: list[str]) -> None:
         if len(args) != 1:
