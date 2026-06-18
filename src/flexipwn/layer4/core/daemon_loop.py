@@ -32,6 +32,7 @@ from flexipwn.layer4.core.notifications import (
     NotificationKind,
     NotificationSink,
 )
+from flexipwn.layer4.core.student_status import push_student_status
 from flexipwn.layer4.core.super_monitor import RichProgressPrinter, SuperMonitor
 from flexipwn.layer4.db import repository
 from flexipwn.layer4.db.models import ExerciseRun, Participant
@@ -321,7 +322,7 @@ class DaemonLoop:
             scenario_id=str(scenario_id),
             participant_id=str(participant_id),
             env_id=env_id,
-            on_update=self._build_engine_callback(env_id, run_id),
+            on_update=self._build_engine_callback(env_id, run_id, scenario_config),
         )
 
         def event_sink(event: MonitorEvent, _run_id=run_id, _engine=engine) -> None:
@@ -381,6 +382,10 @@ class DaemonLoop:
         )
         with self._registered_lock:
             self._registered[env_id] = (engine, orchestrator)
+
+        # Estado inicial del visor del estudiante en el atacante (hints +
+        # objetivos sin cumplir). El callback del engine lo refresca en cada hito.
+        push_student_status(self.provider, env_id, scenario_config)
 
     def _handle_stopping(self, run: ExerciseRun) -> None:
         env_id = run.env_id
@@ -524,14 +529,17 @@ class DaemonLoop:
             f"[green][{new_env_id}][/green] reset completado. "
             f"Nueva clave SSH: {password}  Puerto: {new_port}"
         )
-        # El siguiente tick del daemon detectará el run "running" sin registro
-        # y lo añadirá al SuperMonitor.
+        # Visor del estudiante fresco para el entorno recreado (objetivos sin
+        # cumplir + hints). El siguiente tick lo re-registra en el SuperMonitor.
+        push_student_status(self.provider, new_env_id, scenario_config)
 
     # ------------------------------------------------------------------
     # Engine callback
     # ------------------------------------------------------------------
 
-    def _build_engine_callback(self, env_id: str, run_id: uuid.UUID):
+    def _build_engine_callback(
+        self, env_id: str, run_id: uuid.UUID, scenario_config: ScenarioConfig
+    ):
         rich_cb = self.printer.build_callback(env_id)
 
         def _on_update(result: EvaluationResult) -> None:
@@ -541,6 +549,10 @@ class DaemonLoop:
                     repository.update_target_results_from_engine(s, run_id, result)
             except Exception:
                 logger.exception("Error actualizando progreso en DB")
+            # Refresca el visor del estudiante en el atacante. Al completar no se
+            # actualiza: el entorno se destruye a continuación y el exec fallaría.
+            if not result.completed:
+                push_student_status(self.provider, env_id, scenario_config, result)
             try:
                 rich_cb(result)
             except Exception:
