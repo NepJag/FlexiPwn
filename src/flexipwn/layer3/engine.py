@@ -1,3 +1,4 @@
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -9,6 +10,8 @@ from flexipwn.layer2.events import MonitorEvent
 from flexipwn.layer3.schema import ScenarioConfig, TargetConfig
 from flexipwn.layer3.targets.base import TargetEvaluator
 from flexipwn.layer3.targets.registry import get_evaluator
+
+logger = logging.getLogger(__name__)
 
 
 class TargetResult(BaseModel):
@@ -159,6 +162,13 @@ class EvaluationEngine:
                         state.matched_at = event.timestamp
                         state.trigger_event = event
                         changed = True
+                        logger.debug(
+                            "engine[%s]: hoja #%d (%s) matcheó con evento "
+                            "%s/%s — %s",
+                            self._env_id, state.index, state.config.type,
+                            event.monitor_type, event.event_type,
+                            state.config.description,
+                        )
         return changed
 
     # ------------------------------------------------------------------

@@ -20,6 +20,7 @@ from flexipwn.layer4.core.pid_file import (
 )
 from flexipwn.layer4.db import repository
 from flexipwn.layer4.db.session import get_session
+from flexipwn.observability import configure_logging
 
 app = typer.Typer(help="Daemon supervisor del SuperMonitor (FlexiPwn).")
 console = Console()
@@ -69,12 +70,23 @@ def daemon_start(
         hidden=True,
         help="Modo interno usado por --detach: corre el loop sin REPL.",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Logs DEBUG del flujo del daemon (eventos, matches, escrituras a "
+        "DB). En --detach quedan en el daemon.log.",
+    ),
 ) -> None:
     """Arranca el daemon supervisor.
 
     Por defecto (foreground) abre un REPL interactivo. Con --detach corre en
     background y publica un socket Unix para `flexipwn daemon attach`.
     """
+    # El daemon (y su subproceso --no-repl) es un proceso aparte del CLI raíz,
+    # así que configura su propio logging. configure_logging es idempotente.
+    configure_logging(verbose)
+
     if daemon_is_running():
         console.print("[yellow]El daemon ya está corriendo.[/yellow]")
         raise typer.Exit(1)
@@ -83,15 +95,18 @@ def daemon_start(
 
     if detach:
         log_file = _log_path()
+        detach_args = [
+            sys.executable,
+            "-m",
+            "flexipwn.layer4.cli.daemon",
+            "start",
+            "--no-repl",
+        ]
+        if verbose:
+            detach_args.append("--verbose")
         with open(log_file, "ab") as logf:
             proc = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "flexipwn.layer4.cli.daemon",
-                    "start",
-                    "--no-repl",
-                ],
+                detach_args,
                 stdout=logf,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,

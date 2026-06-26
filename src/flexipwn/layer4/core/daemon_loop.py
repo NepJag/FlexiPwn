@@ -45,6 +45,18 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _short_details(details: dict, limit: int = 200) -> str:
+    """Resumen compacto de los details de un MonitorEvent para el log DEBUG.
+
+    Evita volcar payloads de red enteros: serializa a JSON y recorta.
+    """
+    try:
+        s = json.dumps(details, default=str, ensure_ascii=False)
+    except Exception:
+        s = str(details)
+    return s if len(s) <= limit else s[:limit] + "…"
+
+
 def _build_orchestrator(
     scenario_config: ScenarioConfig,
     docker_env: Environment,
@@ -326,6 +338,11 @@ class DaemonLoop:
         )
 
         def event_sink(event: MonitorEvent, _run_id=run_id, _engine=engine) -> None:
+            logger.debug(
+                "event_sink[%s]: %s/%s details=%s",
+                event.env_id, event.monitor_type, event.event_type,
+                _short_details(event.details),
+            )
             try:
                 with get_session() as s:
                     repository.append_run_event(s, _run_id, event)
@@ -543,6 +560,10 @@ class DaemonLoop:
         rich_cb = self.printer.build_callback(env_id)
 
         def _on_update(result: EvaluationResult) -> None:
+            logger.debug(
+                "engine_update[%s]: progreso=%.0f%% completed=%s",
+                env_id, result.progress * 100, result.completed,
+            )
             try:
                 with get_session() as s:
                     repository.update_run_progress(s, run_id, result.progress)

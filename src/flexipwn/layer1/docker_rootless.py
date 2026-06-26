@@ -345,6 +345,12 @@ class DockerRootlessProvider(EnvironmentProvider):
         env_id = _generate_env_id()
         labels = self._labels(env_id, scenario_id, participant_id)
         vol_base = self._volume_base(env_id)
+        logger.debug(
+            "create: env_id=%s scenario=%s participant=%s image=%s "
+            "attacker=%s network_capture=%s filter=%r",
+            env_id, scenario_id, participant_id, image,
+            attacker_image, enable_network_capture, capture_filter,
+        )
 
         # Recursos creados (para rollback)
         created_dirs = False
@@ -404,6 +410,10 @@ class DockerRootlessProvider(EnvironmentProvider):
             # 2. Redes (interna para vuln↔attacker, externa para attacker↔host)
             internal_net_name, external_net_name = self._create_network(env_id)
             created_network = True
+            logger.debug(
+                "create: redes creadas interna=%s externa=%s",
+                internal_net_name, external_net_name,
+            )
 
             # 3. Contenedor vulnerable — solo en la red interna (sin egress)
             vuln_name = self._container_name(env_id, "vulnerable")
@@ -426,6 +436,7 @@ class DockerRootlessProvider(EnvironmentProvider):
                     f"Error al iniciar contenedor vulnerable: {exc}"
                 )
             created_vulnerable = True
+            logger.debug("create: contenedor vulnerable '%s' iniciado", vuln_name)
 
             # 4. Contenedor atacante (opcional) — arranca en la red externa
             # (no internal) para que Docker pueda publicar los port bindings
@@ -456,6 +467,10 @@ class DockerRootlessProvider(EnvironmentProvider):
 
                 int_net = self.client.networks.get(internal_net_name)
                 int_net.connect(attacker_name)
+                logger.debug(
+                    "create: contenedor atacante '%s' conectado a red interna",
+                    attacker_name,
+                )
 
             # 5. Baseline del filesystem con estrategia robusta
             effective_delay = (
@@ -497,10 +512,17 @@ class DockerRootlessProvider(EnvironmentProvider):
             self._baselines[env_id] = {item["Path"] for item in baseline_diff}
             self._baseline_strategies[env_id] = baseline_strategy
             self._persist_baseline(env_id)
+            logger.debug(
+                "create: baseline (%s) con %d entradas para %s",
+                baseline_strategy, len(self._baselines[env_id]), env_id,
+            )
 
             if enable_network_capture:
                 self._create_sniffer(env_id, capture_filter=capture_filter)
                 created_sniffer = True
+                logger.debug(
+                    "create: sniffer tcpdump iniciado (filtro=%r)", capture_filter
+                )
 
             # volume_mappings: container_log_path → host_log_dir (directorio)
             volume_mappings = {

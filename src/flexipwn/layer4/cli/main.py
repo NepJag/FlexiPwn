@@ -7,6 +7,7 @@ from flexipwn.layer4.cli import participant as participant_mod
 from flexipwn.layer4.cli import run as run_mod
 from flexipwn.layer4.cli import scenario as scenario_mod
 from flexipwn.layer4.db.session import get_engine, init_db
+from flexipwn.observability import configure_logging
 
 app = typer.Typer(
     help="FlexiPwn — plataforma educativa de ciberseguridad ofensiva",
@@ -20,7 +21,17 @@ app.add_typer(daemon_mod.app, name="daemon")
 
 
 @app.callback(invoke_without_command=True)
-def _init(ctx: typer.Context) -> None:
+def _init(
+    ctx: typer.Context,
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Logs DEBUG del flujo completo (creación de entorno, eventos, "
+        "matches, escrituras a DB). Equivale a FLEXIPWN_LOG=DEBUG.",
+    ),
+) -> None:
+    configure_logging(verbose)
     if ctx.invoked_subcommand is None:
         return
     engine = get_engine()
