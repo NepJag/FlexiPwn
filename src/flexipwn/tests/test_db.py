@@ -157,8 +157,11 @@ class TestParticipantCRUD:
         session.add(p1)
         session.commit()
         session.add(p2)
-        with pytest.raises(Exception):
+        # Restricción unique sobre username → IntegrityError específico
+        # (no una Exception genérica): un username duplicado nunca se persiste.
+        with pytest.raises(IntegrityError):
             session.commit()
+        session.rollback()
 
     def test_create_participant_via_repository(self, engine):
         from flexipwn.layer4.db import repository
@@ -383,3 +386,61 @@ class TestRepositoryHelpers:
             repository.delete_participant(s, participant.id)
             from flexipwn.layer4.db.models import Participant as P
             assert s.get(P, participant.id) is None
+
+
+# ---------------------------------------------------------------------------
+# Unicidad de env_id (Tarea 3 — caso borde 5.4)
+# ---------------------------------------------------------------------------
+
+
+class TestEnvIdUnique:
+    """`ExerciseRun.env_id` es ``unique=True``: dos runs jamás comparten env_id,
+    aunque sean de participantes distintos.
+
+    Distinto del índice parcial ``uq_active_run``, que solo cubre
+    ``status = 'running'`` para el mismo par escenario+participante. Para aislar
+    la restricción de env_id se usan participantes distintos con el MISMO env_id:
+    así la única violación posible es la de env_id, no la del índice parcial.
+    """
+
+    def _seed(self, session):
+        scenario = Scenario(
+            yaml_path="/tmp/e.yaml", yaml_content="t",
+            title="E", description="", author="a",
+            level="beginner", category="pwning", image="img:latest",
+        )
+        p1 = Participant(username="student-env001", password_hash="h")
+        p2 = Participant(username="student-env002", password_hash="h")
+        session.add(scenario)
+        session.add(p1)
+        session.add(p2)
+        session.commit()
+        session.refresh(scenario)
+        session.refresh(p1)
+        session.refresh(p2)
+        return scenario, p1, p2
+
+    def test_env_id_unique_model(self, session):
+        scenario, p1, p2 = self._seed(session)
+        session.add(ExerciseRun(
+            scenario_id=scenario.id, participant_id=p1.id,
+            env_id="run-dupe0001", status="pending",
+        ))
+        session.commit()
+        # Distinto participante, MISMO env_id → falla por unicidad de env_id.
+        session.add(ExerciseRun(
+            scenario_id=scenario.id, participant_id=p2.id,
+            env_id="run-dupe0001", status="pending",
+        ))
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+    def test_env_id_unique_via_repository(self, engine):
+        from flexipwn.layer4.db import repository
+        with Session(engine) as s:
+            scenario, p1, p2 = self._seed(s)
+            repository.create_run(s, scenario.id, p1.id, "run-dupe0002")
+            with pytest.raises(IntegrityError):
+                repository.create_run(s, scenario.id, p2.id, "run-dupe0002")
+            s.rollback()
