@@ -218,6 +218,10 @@ class TestEnableNetworkCaptureFlag:
         config.healthcheck_timeout = 0.1
         config.healthcheck_poll_interval = 0.05
         config.container_stop_timeout = 1
+        # attacker_bind_ips usa field(default_factory=...), así que no es atributo
+        # de clase y MagicMock(spec=...) no lo expone: hay que stubearlo o create()
+        # lanza AttributeError (en _parse_port_bindings) antes de llegar al sniffer.
+        config.attacker_bind_ips = None
 
         provider = DockerRootlessProvider(config=config, client=mock_client)
 
@@ -255,6 +259,10 @@ class TestEnableNetworkCaptureFlag:
         config.healthcheck_timeout = 0.1
         config.healthcheck_poll_interval = 0.05
         config.container_stop_timeout = 1
+        # attacker_bind_ips usa field(default_factory=...), así que no es atributo
+        # de clase y MagicMock(spec=...) no lo expone: hay que stubearlo o create()
+        # lanza AttributeError (en _parse_port_bindings) antes de llegar al sniffer.
+        config.attacker_bind_ips = None
 
         provider = DockerRootlessProvider(config=config, client=mock_client)
 

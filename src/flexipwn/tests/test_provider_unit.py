@@ -565,7 +565,10 @@ class TestSnifferCaptureFilter:
         cmd = kwargs["command"]
         assert cmd[0] == "sh"
         assert cmd[1] == "-c"
-        assert "tcpdump -i any -A -n -l 2>/dev/null" in cmd[2]
+        # tcpdump se copia a /tmp/fpcap y se ejecuta desde ahí (workaround
+        # AppArmor) para poder detener el sniffer en el teardown.
+        assert 'cp "$T" /tmp/fpcap' in cmd[2]
+        assert "/tmp/fpcap -i any -A -n -l 2>/dev/null" in cmd[2]
         assert cmd[2].endswith("port 3306 > /capture/traffic.txt")
 
     @patch("flexipwn.layer1.docker_rootless._detect_socket", return_value="unix:///fake.sock")
@@ -578,4 +581,7 @@ class TestSnifferCaptureFilter:
         provider._create_sniffer("run-abc123")
 
         cmd = mock_client.containers.run.call_args.kwargs["command"]
-        assert cmd[2] == "tcpdump -i any -A -n -l 2>/dev/null > /capture/traffic.txt"
+        assert cmd[2] == (
+            'T=$(command -v tcpdump); cp "$T" /tmp/fpcap; '
+            "exec /tmp/fpcap -i any -A -n -l 2>/dev/null > /capture/traffic.txt"
+        )
