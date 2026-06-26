@@ -131,6 +131,7 @@ Comandos disponibles:
 
   scenario list                       — lista escenarios cargados
   scenario load <yaml>                — carga un escenario YAML
+  scenario validate <yaml>            — valida un YAML sin cargarlo (chequeo en seco)
   scenario show <id>                  — detalle de un escenario
   scenario remove <id> [--yes]        — elimina un escenario terminal (definición + runs + contenedores)
   scenario reset-all                  — limpia TODO el laboratorio (conserva participantes)
@@ -168,6 +169,7 @@ _COMPLETION_COMMANDS = (
     "clear",
     "scenario list",
     "scenario load",
+    "scenario validate",
     "scenario show",
     "scenario remove",
     "scenario reset-all",
@@ -192,7 +194,7 @@ _COMPLETION_COMMANDS = (
     "quit",
 )
 # Comandos cuyo argumento es una ruta a un YAML → completado de archivos.
-_PATH_COMMANDS = frozenset({"scenario load", "run batch-start"})
+_PATH_COMMANDS = frozenset({"scenario load", "scenario validate", "run batch-start"})
 
 
 def _is_yaml_or_dir(path: str) -> bool:
@@ -292,6 +294,7 @@ class FlexiPwnREPL:
             "clear": self._cmd_clear,
             "scenario list": self._cmd_scenario_list,
             "scenario load": self._cmd_scenario_load,
+            "scenario validate": self._cmd_scenario_validate,
             "scenario show": self._cmd_scenario_show,
             "scenario remove": self._cmd_scenario_remove,
             "scenario reset-all": self._cmd_scenario_reset_all,
@@ -395,6 +398,13 @@ class FlexiPwnREPL:
         from flexipwn.layer4.cli.scenario import scenario_load
         scenario_load(args[0])
 
+    def _cmd_scenario_validate(self, args: list[str]) -> None:
+        if len(args) != 1:
+            self.console.print("[red]Uso:[/red] scenario validate <yaml>")
+            return
+        from flexipwn.layer4.cli.scenario import scenario_validate
+        scenario_validate(args[0])
+
     def _cmd_scenario_show(self, args: list[str]) -> None:
         if len(args) != 1:
             self.console.print("[red]Uso:[/red] scenario show <id>")
@@ -489,6 +499,7 @@ class FlexiPwnREPL:
         # En el REPL siempre lanzamos el wizard (los flags --scenario/--participant
         # de la CLI siguen disponibles desde fuera del REPL).
         from flexipwn.layer4.cli.run import (
+            ProvisionError,
             _print_ssh_instruction,
             _provision_environment,
             _wait_for_credentials,
@@ -503,9 +514,13 @@ class FlexiPwnREPL:
             return
 
         config = FlexiPwnConfig()
-        env_id, ssh_port, run_id = _provision_environment(
-            scenario_id, participant_id, config
-        )
+        try:
+            env_id, ssh_port, run_id = _provision_environment(
+                scenario_id, participant_id, config
+            )
+        except ProvisionError as exc:
+            self.console.print(exc.message)
+            return
         self.console.print(f"\n[green]Entorno activo:[/green] [bold]{env_id}[/bold]")
         username, password = _wait_for_credentials(run_id, DAEMON_CRED_TIMEOUT_SECONDS)
         if username and password:

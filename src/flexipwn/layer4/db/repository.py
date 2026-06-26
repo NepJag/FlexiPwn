@@ -281,6 +281,28 @@ def get_active_runs_by_participant(
     )
 
 
+def get_active_run_for_pair(
+    session: Session,
+    scenario_id: uuid.UUID,
+    participant_id: uuid.UUID,
+) -> ExerciseRun | None:
+    """Run activo (no terminal) para un par escenario+participante, si existe.
+
+    Permite rechazar un segundo run del mismo par ANTES de crear contenedores.
+    El índice parcial uq_active_run solo bloquea status='running', pero aquí
+    consideramos todos los estados activos para no dejar entornos a medio
+    aprovisionar ni mensajes confusos.
+    """
+    return session.exec(
+        select(ExerciseRun)
+        .where(ExerciseRun.scenario_id == scenario_id)
+        .where(ExerciseRun.participant_id == participant_id)
+        .where(
+            ExerciseRun.status.in_(("pending", "running", "stopping", "resetting"))  # type: ignore[attr-defined]
+        )
+    ).first()
+
+
 def delete_participant(session: Session, participant_id: uuid.UUID) -> None:
     participant = session.get(Participant, participant_id)
     if participant is None:

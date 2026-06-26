@@ -158,6 +158,23 @@ def _provision_environment(
             "YAML del escenario."
         )
 
+    # Pre-chequeo: rechazar un segundo run del mismo par escenario+participante
+    # ANTES de crear contenedores. Sin esto, provider.create() levanta el
+    # entorno y recién mark_run_started choca con uq_active_run, dejando
+    # contenedores huérfanos.
+    with get_session() as session:
+        existing = repository.get_active_run_for_pair(
+            session, scenario_db_id, participant_id
+        )
+        if existing is not None:
+            raise ProvisionError(
+                f"[red]Ya hay un run activo para este participante en este "
+                f"escenario[/red] (env_id: {existing.env_id}, estado: "
+                f"{existing.status}).\n"
+                f"Detenlo con [yellow]run stop {existing.env_id}[/yellow] o "
+                f"reinícialo con [yellow]run reset {existing.env_id}[/yellow]."
+            )
+
     try:
         ssh_port = find_free_port(
             config.attacker_port_range_start, config.attacker_port_range_end
@@ -194,14 +211,34 @@ def _provision_environment(
 
     env_id = docker_env.env_id
 
-    with get_session() as session:
-        run = repository.create_run(
-            session, scenario_db_id, participant_id, env_id,
-            attacker_ssh_port=ssh_port,
+    # El entorno ya existe en Docker; si el registro en DB falla (p.ej. una
+    # carrera coló un run del mismo par y mark_run_started choca con
+    # uq_active_run), revertimos: destruimos contenedores/redes/volúmenes y
+    # borramos la fila pendiente para no dejar residuos.
+    try:
+        with get_session() as session:
+            run = repository.create_run(
+                session, scenario_db_id, participant_id, env_id,
+                attacker_ssh_port=ssh_port,
+            )
+            run_id = run.id
+            repository.mark_run_started(session, run_id, attacker_ssh_port=ssh_port)
+            repository.bulk_create_target_results(session, run_id, scenario_config)
+    except Exception as exc:
+        try:
+            provider.destroy(env_id)
+        except Exception:
+            pass
+        try:
+            with get_session() as session:
+                orphan = repository.get_run_by_env_id(session, env_id)
+                if orphan is not None:
+                    repository.delete_run(session, orphan.id)
+        except Exception:
+            pass
+        raise ProvisionError(
+            f"[red]No se pudo registrar el run; entorno revertido.[/red] {exc}"
         )
-        run_id = run.id
-        repository.mark_run_started(session, run_id, attacker_ssh_port=ssh_port)
-        repository.bulk_create_target_results(session, run_id, scenario_config)
 
     return env_id, ssh_port, run_id
 
