@@ -218,6 +218,112 @@ cat /tmp/flexipwn-volumes/<env>/capture/traffic.txt   # bytes crudos capturados 
 > `log_pattern` (requieren el flujo por la app) y el target #6 (la flag en la
 > respuesta, que aquí no existió porque MySQL rechazó la conexión y no se consultó tampoco por la tabla de datos sensible).
 
+### 4.2. Variante — falsificación de origen (CAP_NET_RAW)
+
+**Tesis a validar:** el detector de red matchea el patrón del paquete y **no
+valida la dirección de origen**. Como el contenedor atacante conserva la
+capability `CAP_NET_RAW` del set por defecto de Docker (no se dropea en
+`provider.create()`, ver `docker_rootless.py:449-458`), puede forjar un paquete
+con IP de origen arbitraria y gatillar el objetivo de red sin que la app, ni una conexión TCP real, intervengan. Complementa la trampa de 4.1: allí la query era
+real pero llegaba por fuera del flujo; aquí ni siquiera hay conexión.
+
+#### El experimento
+
+```bash
+# 1. Confirmar CAP_NET_RAW en el atacante (bit 13 del CapEff)
+docker exec flexipwn-<env>-attacker sh -c \
+  'apt-get update -qq && apt-get install -y -qq libcap2-bin && \
+   capsh --decode=$(awk "/CapEff/{print \$2}" /proc/self/status)' | grep -o cap_net_raw
+
+# 2. Forjar un paquete con origen falsificado hacia el 3306 del VULNERABLE.
+docker exec flexipwn-<env>-attacker bash -lc '
+  apt-get update -qq && apt-get install -y -qq python3-scapy >/dev/null
+  python3 - <<PY
+from scapy.all import IP, TCP, send
+pkt = IP(src="10.10.0.5", dst="flexipwn-<env>-vulnerable")/TCP(dport=3306, flags="PA")/b"admin OR 1=1 UNION SELECT"
+send(pkt, count=1)
+PY'
+
+# 3. Verificar que el objetivo se marca sin que la app emitiera nada
+flexipwn run watch <env>     # aparece un evento network/network_payload
+flexipwn run progress <env>  # target #5 (OR 1=1 / UNION SELECT) → ✓
+```
+
+> ✅ **Resultado validado (08/07/2026).** El target #5 (patrón `OR 1=1` /
+> `UNION SELECT`) pasó a ✓ a partir del paquete forjado con IP de origen
+> falsificada (`10.10.0.5`), sin que la app emitiera nada ni existiera una
+> conexión TCP real. Queda demostrado que la detección no depende del origen y
+> que un filtro por IP no aportaría robustez, porque el origen es *spoofeable*
+> con `CAP_NET_RAW`. Referencia: CVE-2020-13401 (un contenedor con
+> `CAP_NET_RAW` puede forjar paquetes; allí Router Advertisements ICMPv6 contra
+> el host, corregido en Docker 19.03.11).
+
+### 4.3. Aislamiento por interfaz — `-i lo` vs bridge
+
+**Tesis a validar:** el flujo legítimo app→BD viaja por `lo` (la app consulta
+`127.0.0.1:3306`, `app.py:28`), mientras que un paquete inyectado desde el
+atacante llega por la interfaz del bridge interno (`eth0`). Bindear la captura a una interfaz concreta *particulariza* la detección: `-i lo` observa solo el
+camino real app↔BD y, a diferencia de un filtro por IP de origen, **no es
+evadible por spoofing**, porque un paquete externo no puede aparecer en el
+loopback de otro *network namespace*. Para inyectar tráfico ahí habría que
+ejecutar código dentro de la propia máquina a vulnerar, es decir, haberla
+comprometido de antemano.
+
+#### El experimento
+
+Con el escenario sqli corriendo, dos sniffers manuales en el netns del
+vulnerable (no tocan el código; son netshoot efímeros):
+
+```bash
+docker run --rm -it --network container:flexipwn-<env>-vulnerable \
+  nicolaka/netshoot tcpdump -i lo   -A -n port 3306   # Terminal 1
+docker run --rm -it --network container:flexipwn-<env>-vulnerable \
+  nicolaka/netshoot tcpdump -i eth0 -A -n port 3306   # Terminal 2
+```
+
+Luego: (1) el SQLi real por la web (§4.1) y (2) el paquete forjado del atacante
+con origen falsificado (§4.2).
+
+> ✅ **Resultado validado (08/07/2026).** El SQLi por la web (ejercicio real con FlexiPwn) apareció **solo en
+> `lo`**, con la query completa que la app envió a MySQL:
+> ```
+> 127.0.0.1.52482 > 127.0.0.1.3306: Flags [P.] ...
+> SELECT * FROM users WHERE username='admin' OR '1'='1' -- ' AND password='x'
+> ```
+> El paquete forjado (origen falsificado `10.10.0.5`) apareció **solo en `eth0`**:
+> ```
+> 10.10.0.5.20 > 10.200.1.2.3306: Flags [P.] ... admin OR 1=1 UNION SELECT
+> ```
+> Conclusión: bindear a `lo` aísla el camino real app↔BD y deja fuera el paquete
+> externo. El origen es *spoofeable* (por eso un filtro `src host` no serviría),
+> pero la **interfaz de llegada no lo es**: el atacante no puede depositar tráfico
+> en el `lo` del vulnerable desde otro contenedor. Salvedad: no se puede fijar
+> `-i lo` de forma global, ya que cmdinj detecta la reverse shell por
+> `network_connection` en el bridge (puerto 4444), que en `lo` no se vería. La
+> interfaz tendría que ser configurable por escenario.
+
+> **Nota.** Una interfaz
+> *exclusiva* app↔BD (no el loopback compartido) supone separar la aplicación y
+> la base de datos en contenedores distintos unidos por una red propia. No es
+> parte de FlexiPwn, pero el
+> concepto se ilustra con contenedores desechables:
+>
+> ```bash
+> docker network create fp-appdb-demo
+> docker run -d --name db-demo  --network fp-appdb-demo nicolaka/netshoot nc -lk -p 3306
+> docker run -d --name app-demo --network fp-appdb-demo nicolaka/netshoot sleep infinity
+> # Terminal 1 (foreground): sniffer del enlace dedicado
+> docker run --rm -it --network container:app-demo nicolaka/netshoot tcpdump -i eth0 -A -n
+> # Terminal 2: tráfico app->db
+> docker exec app-demo sh -c 'echo "SELECT 1 FROM users" | nc -w2 db-demo 3306'
+> # limpieza
+> docker rm -f app-demo db-demo; docker network rm fp-appdb-demo
+> ```
+>
+> En esa interfaz aparece únicamente la conversación app↔BD (handshake, la query
+> y su ARP), sin ruido de usuario ni de terceros: el segmento dedicado no lo
+> alcanza el spoofing porque el atacante no está en esa red. Llevarlo a un
+> escenario real de la plataforma requiere un cambio de arquitectura.
 
 ---
 
