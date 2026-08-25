@@ -78,14 +78,30 @@ fi
 # ---------------------------------------------------------------------------
 
 # RSS en MiB del arbol de procesos del daemon, leido desde el pid file.
+# Se lee /proc/<pid>/status directamente: construir una lista separada por comas
+# para `ps -p` fallaba en silencio cuando el daemon no tenia procesos hijos.
 daemon_rss_mib() {
   local pidfile="$HOME/.flexipwn/daemon.pid"
-  [ -f "$pidfile" ] || { echo "0"; return; }
-  local pid; pid="$(cat "$pidfile" 2>/dev/null)"
-  [ -n "$pid" ] || { echo "0"; return; }
-  # Suma el RSS del proceso y de sus hijos directos.
-  local pids; pids="$pid $(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ')"
-  ps -o rss= -p ${pids// /,} 2>/dev/null | awk '{s+=$1} END {printf "%.1f", s/1024}'
+  [ -f "$pidfile" ] || { echo "0.0"; return; }
+  local pid; pid="$(tr -dc '0-9' < "$pidfile" 2>/dev/null)"
+  [ -n "$pid" ] || { echo "0.0"; return; }
+  [ -d "/proc/$pid" ] || { echo "0.0"; return; }
+
+  # Arbol de procesos: el daemon y sus descendientes hasta dos niveles.
+  local todos="$pid" hijo nieto
+  for hijo in $(pgrep -P "$pid" 2>/dev/null); do
+    todos="$todos $hijo"
+    for nieto in $(pgrep -P "$hijo" 2>/dev/null); do
+      todos="$todos $nieto"
+    done
+  done
+
+  local total=0 rss p
+  for p in $todos; do
+    rss="$(awk '/^VmRSS:/ {print $2}' "/proc/$p/status" 2>/dev/null)"
+    [ -n "$rss" ] && total=$((total + rss))
+  done
+  awk -v t="$total" 'BEGIN {printf "%.1f", t/1024}'
 }
 
 # Contenedores gestionados por FlexiPwn que estan corriendo ahora.
@@ -224,8 +240,9 @@ $FLEXIPWN run batch-start "${OUTDIR}/batch-n.yaml" --output "${OUTDIR}/runs-n.cs
   > "${OUTDIR}/batch-n.log" 2>&1
 T1=$(date +%s.%N)
 TIEMPO_N=$(awk -v a="$T0" -v b="$T1" 'BEGIN {printf "%.1f", b-a}')
-sleep 10
+sleep 15   # deja que todos los entornos terminen de inicializar
 stats_snapshot > "${OUTDIR}/stats-n.csv"
+sleep 5    # una muestra mas ya en regimen, para que el pico no quede corto
 stop_sampler
 
 MEM_N="$(managed_mem_mib)"
@@ -261,10 +278,14 @@ MEM_POR_ENTORNO=$(awk -v t="$MEM_N" -v b="$MEM_BASE" -v n="$TOTAL_ENTORNOS" \
   echo "| Arranque de un entorno en frio | ${TIEMPO_1} s |"
   echo "| Arranque de ${N_BATCH} entornos por lotes | ${TIEMPO_N} s (${TIEMPO_POR_ENTORNO} s por entorno) |"
   echo
-  echo "Notas: el arranque por lotes es secuencial, de modo que el tiempo total"
-  echo "escala de forma aproximadamente lineal con la cantidad de participantes."
-  echo "Cada entorno se compone del contenedor vulnerable, el contenedor atacante"
-  echo "y, cuando el escenario tiene objetivos de red, el sidecar de captura."
+  echo "Escenario medido: ${ESCENARIO_TITULO}"
+  echo
+  echo "Notas: el arranque por lotes es secuencial. Compara el costo por entorno"
+  echo "del batch (${TIEMPO_POR_ENTORNO} s) contra el arranque en frio de uno solo"
+  echo "(${TIEMPO_1} s) para ver si el costo por entorno crece con la cantidad de"
+  echo "entornos activos. Cada entorno se compone del contenedor vulnerable, el"
+  echo "contenedor atacante y, cuando el escenario declara objetivos de red, el"
+  echo "sidecar de captura, de ahi que el conteo por entorno sea 2 o 3."
   echo
   echo "## Archivos crudos"
   echo
