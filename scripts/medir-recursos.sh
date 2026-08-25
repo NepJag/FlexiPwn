@@ -240,6 +240,20 @@ echo "tiempo de arranque : ${TIEMPO_1} s"
 echo "contenedores       : ${N_CONT_1} (base ${RUNS_PREVIOS})"
 echo "memoria del entorno: ${MEM_ENTORNO} MiB"
 
+# Se elimina este entorno antes del lote, para que el lote quede con exactamente
+# N_BATCH entornos y las cifras se refieran a ese numero redondo y no a N+1.
+: > "${OUTDIR}/ya-eliminados.txt"
+if [ -f "${OUTDIR}/runs-1.csv" ]; then
+  tail -n +2 "${OUTDIR}/runs-1.csv" | awk -F',' '{print $3}' | while read -r env_id; do
+    [ -n "$env_id" ] || continue
+    $FLEXIPWN run stop "$env_id"         >/dev/null 2>&1
+    $FLEXIPWN run remove "$env_id" --yes >/dev/null 2>&1
+    echo "$env_id" >> "${OUTDIR}/ya-eliminados.txt"
+  done
+  sleep 5
+  echo "entorno eliminado antes del lote; contenedores activos: $(managed_containers | wc -l)"
+fi
+
 # ---------------------------------------------------------------------------
 # 4. Batch de N entornos
 # ---------------------------------------------------------------------------
@@ -285,7 +299,9 @@ echo "daemon bajo carga  : ${RSS_N} MiB de RSS"
 # ---------------------------------------------------------------------------
 # 5. Resumen
 # ---------------------------------------------------------------------------
-TOTAL_ENTORNOS=$((N_BATCH + 1))
+# El lote es la referencia: el entorno suelto ya se elimino antes de empezarlo.
+TOTAL_ENTORNOS="$CREADOS_N"
+[ "$TOTAL_ENTORNOS" -gt 0 ] || TOTAL_ENTORNOS=1
 MEM_POR_ENTORNO=$(awk -v t="$MEM_N" -v b="$MEM_BASE" -v n="$TOTAL_ENTORNOS" \
   'BEGIN {printf "%.1f", (t-b)/n}')
 
@@ -305,6 +321,8 @@ MEM_POR_ENTORNO=$(awk -v t="$MEM_N" -v b="$MEM_BASE" -v n="$TOTAL_ENTORNOS" \
   echo "| Arranque de ${N_BATCH} entornos por lotes | ${TIEMPO_N} s (${TIEMPO_POR_ENTORNO} s por entorno) |"
   echo
   echo "Escenario medido: ${ESCENARIO_TITULO}"
+  echo
+  echo "Entornos creados por el lote: ${CREADOS_N} de ${N_BATCH} pedidos."
   echo
   echo "Notas: el arranque por lotes es secuencial. Compara el costo por entorno"
   echo "del batch (${TIEMPO_POR_ENTORNO} s) contra el arranque en frio de uno solo"
@@ -333,12 +351,14 @@ else
   # ahora y no existiera al empezar. Lo segundo cubre los entornos que el lote
   # alcanzo a crear parcialmente y que por eso nunca llegaron al CSV. Los
   # entornos que ya estaban antes de arrancar no se tocan nunca.
+  touch "${OUTDIR}/ya-eliminados.txt"
   {
     for csv in "${OUTDIR}/runs-1.csv" "${OUTDIR}/runs-n.csv"; do
       [ -f "$csv" ] && tail -n +2 "$csv" | awk -F',' '{print $3}'
     done
     comm -13 "$ENV_IDS_INICIALES" <(managed_env_ids)
-  } | grep -v '^$' | sort -u > "${OUTDIR}/a-borrar.txt"
+  } | grep -v '^$' | sort -u \
+    | comm -13 <(sort -u "${OUTDIR}/ya-eliminados.txt") - > "${OUTDIR}/a-borrar.txt"
 
   while read -r env_id; do
     [ -n "$env_id" ] || continue
