@@ -110,9 +110,36 @@ managed_containers() {
 }
 
 # env_id de cada entorno de FlexiPwn presente ahora, sin repetir.
+# Se deriva del NOMBRE del contenedor (flexipwn-<env_id>-<rol>) y no de la
+# etiqueta: en `docker ps --format` el campo .Labels es un string, no un mapa,
+# de modo que `{{index .Labels "clave"}}` falla en silencio y devuelve vacio.
 managed_env_ids() {
-  docker ps -a --filter "label=flexipwn.managed=true" \
-    --format '{{index .Labels "flexipwn.env_id"}}' 2>/dev/null | grep -v '^$' | sort -u
+  docker ps -a --filter "label=flexipwn.managed=true" --format '{{.Names}}' 2>/dev/null \
+    | sed -E 's/^flexipwn-(.+)-(vulnerable|attacker|sniffer)$/\1/' \
+    | grep -v '^$' | sort -u
+}
+
+# ¿Quedan contenedores de este entorno?
+entorno_vivo() {
+  docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^flexipwn-${1}-"
+}
+
+# Baja un entorno y espera de verdad a que desaparezca.
+#
+# Hay que insistir por dos razones, ambas del lado de la plataforma:
+#   1. `run stop` es asincrono: solo marca el run como "stopping" y el daemon
+#      limpia despues. "stopping" no es un estado terminal.
+#   2. `run remove` exige un estado terminal, pero sale con codigo 0 aunque se
+#      niegue a borrar, de modo que no se puede confiar en su codigo de salida.
+borrar_entorno() {
+  local env_id="$1" intento
+  for intento in $(seq 1 12); do
+    $FLEXIPWN run stop "$env_id"         >/dev/null 2>&1
+    $FLEXIPWN run remove "$env_id" --yes >/dev/null 2>&1
+    entorno_vivo "$env_id" || return 0
+    sleep 3
+  done
+  return 1
 }
 
 # Snapshot de memoria de los contenedores gestionados. Escribe a stdout un CSV.
@@ -214,8 +241,15 @@ echo "daemon en reposo: ${RSS_REPOSO} MiB de RSS"
 # ---------------------------------------------------------------------------
 log "Un entorno"
 
-$FLEXIPWN scenario load "$ESCENARIO_YAML" >/dev/null 2>&1 || \
-  warn "scenario load fallo o el escenario ya estaba cargado. Continuo."
+# Solo se carga si no esta ya en la base: `scenario load` no deduplica por
+# titulo y cada corrida agregaria una fila mas con el mismo nombre, que despues
+# confunde a `batch-start`, que busca los escenarios por titulo.
+if $FLEXIPWN scenario list 2>/dev/null | grep -qF "$ESCENARIO_TITULO"; then
+  echo "escenario ya cargado, no se vuelve a cargar"
+else
+  $FLEXIPWN scenario load "$ESCENARIO_YAML" >/dev/null 2>&1 \
+    || warn "scenario load fallo. Continuo, pero el lote puede no encontrar el escenario."
+fi
 
 cat > "${OUTDIR}/batch-1.yaml" <<EOF
 assignments:
@@ -246,11 +280,9 @@ echo "memoria del entorno: ${MEM_ENTORNO} MiB"
 if [ -f "${OUTDIR}/runs-1.csv" ]; then
   tail -n +2 "${OUTDIR}/runs-1.csv" | awk -F',' '{print $3}' | while read -r env_id; do
     [ -n "$env_id" ] || continue
-    $FLEXIPWN run stop "$env_id"         >/dev/null 2>&1
-    $FLEXIPWN run remove "$env_id" --yes >/dev/null 2>&1
+    borrar_entorno "$env_id" || warn "no se pudo bajar ${env_id} antes del lote"
     echo "$env_id" >> "${OUTDIR}/ya-eliminados.txt"
   done
-  sleep 5
   echo "entorno eliminado antes del lote; contenedores activos: $(managed_containers | wc -l)"
 fi
 
@@ -362,10 +394,11 @@ else
 
   while read -r env_id; do
     [ -n "$env_id" ] || continue
-    $FLEXIPWN run stop "$env_id"          >/dev/null 2>&1
-    $FLEXIPWN run remove "$env_id" --yes  >/dev/null 2>&1 \
-      && echo "  eliminado ${env_id}" \
-      || warn "  no se pudo eliminar ${env_id}, revisalo a mano"
+    if borrar_entorno "$env_id"; then
+      echo "  eliminado ${env_id}"
+    else
+      warn "  ${env_id} sigue con contenedores despues de reintentar, revisalo a mano"
+    fi
   done < "${OUTDIR}/a-borrar.txt"
 
   # Verificacion: ¿quedo algo vivo que no estuviera antes?
