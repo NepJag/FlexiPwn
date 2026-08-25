@@ -109,6 +109,12 @@ managed_containers() {
   docker ps --filter "label=flexipwn.managed=true" --format '{{.Names}}'
 }
 
+# env_id de cada entorno de FlexiPwn presente ahora, sin repetir.
+managed_env_ids() {
+  docker ps -a --filter "label=flexipwn.managed=true" \
+    --format '{{index .Labels "flexipwn.env_id"}}' 2>/dev/null | grep -v '^$' | sort -u
+}
+
 # Snapshot de memoria de los contenedores gestionados. Escribe a stdout un CSV.
 stats_snapshot() {
   local names; names="$(managed_containers)"
@@ -186,7 +192,18 @@ else
 fi
 
 RUNS_PREVIOS="$(managed_containers | wc -l)"
-[ "$RUNS_PREVIOS" -gt 0 ] && warn "Hay ${RUNS_PREVIOS} contenedores de FlexiPwn ya corriendo. Se descuentan de las cifras por entorno."
+managed_env_ids > "${OUTDIR}/env-ids-iniciales.txt"
+ENV_IDS_INICIALES="${OUTDIR}/env-ids-iniciales.txt"
+
+if [ "$RUNS_PREVIOS" -gt 0 ]; then
+  warn "Hay ${RUNS_PREVIOS} contenedores de FlexiPwn ya corriendo, de $(wc -l < "$ENV_IDS_INICIALES") entornos:"
+  sed 's/^/    /' "$ENV_IDS_INICIALES"
+  if [ "${FORCE:-0}" != "1" ]; then
+    echo
+    die "Con entornos preexistentes las cifras por entorno salen mal, porque se calculan restando la base. Limpia primero con 'flexipwn run list' y 'flexipwn run remove <env_id> --yes', o repite con FORCE=1 si solo te interesan los totales."
+  fi
+  warn "FORCE=1: continuo, pero las cifras POR ENTORNO de esta corrida no son confiables."
+fi
 
 RSS_REPOSO="$(daemon_rss_mib)"
 MEM_BASE="$(managed_mem_mib)"
@@ -248,6 +265,15 @@ stop_sampler
 MEM_N="$(managed_mem_mib)"
 RSS_N="$(daemon_rss_mib)"
 N_CONT_N="$(managed_containers | wc -l)"
+
+# ¿Se crearon todos los entornos que pedimos? batch-start es tolerante a fallos:
+# si un entorno no se puede crear, lo registra y sigue con el siguiente, de modo
+# que el CSV solo trae los que si se crearon.
+CREADOS_N=0
+[ -f "${OUTDIR}/runs-n.csv" ] && CREADOS_N=$(($(wc -l < "${OUTDIR}/runs-n.csv") - 1))
+if [ "$CREADOS_N" -lt "$N_BATCH" ]; then
+  warn "El lote pidio ${N_BATCH} entornos y solo se crearon ${CREADOS_N}. Revisa ${OUTDIR}/batch-n.log: probablemente se alcanzo un limite del servidor (memoria, puertos o descriptores). Las cifras de este lote describen ${CREADOS_N} entornos, no ${N_BATCH}."
+fi
 PICO=$(awk -F',' 'NR>1 && $2>m {m=$2} END {printf "%.1f", m}' "${OUTDIR}/muestreo.csv")
 TIEMPO_POR_ENTORNO=$(awk -v t="$TIEMPO_N" -v n="$N_BATCH" 'BEGIN {printf "%.1f", t/n}')
 
@@ -302,17 +328,34 @@ if [ "$SKIP_CLEANUP" = "1" ]; then
   log "Limpieza omitida (SKIP_CLEANUP=1). Los runs quedan vivos."
 else
   log "Limpieza de los runs creados por este script"
-  for csv in "${OUTDIR}/runs-1.csv" "${OUTDIR}/runs-n.csv"; do
-    [ -f "$csv" ] || continue
-    # Columna env_id del CSV: scenario,username,env_id,ssh_port,ssh_password
-    tail -n +2 "$csv" | awk -F',' '{print $3}' | while read -r env_id; do
-      [ -n "$env_id" ] || continue
-      $FLEXIPWN run stop "$env_id"          >/dev/null 2>&1
-      $FLEXIPWN run remove "$env_id" --yes  >/dev/null 2>&1 \
-        && echo "  eliminado ${env_id}" \
-        || warn "  no se pudo eliminar ${env_id}, revisalo a mano"
+
+  # La lista a borrar son los env_id de los CSV mas cualquier entorno que exista
+  # ahora y no existiera al empezar. Lo segundo cubre los entornos que el lote
+  # alcanzo a crear parcialmente y que por eso nunca llegaron al CSV. Los
+  # entornos que ya estaban antes de arrancar no se tocan nunca.
+  {
+    for csv in "${OUTDIR}/runs-1.csv" "${OUTDIR}/runs-n.csv"; do
+      [ -f "$csv" ] && tail -n +2 "$csv" | awk -F',' '{print $3}'
     done
-  done
+    comm -13 "$ENV_IDS_INICIALES" <(managed_env_ids)
+  } | grep -v '^$' | sort -u > "${OUTDIR}/a-borrar.txt"
+
+  while read -r env_id; do
+    [ -n "$env_id" ] || continue
+    $FLEXIPWN run stop "$env_id"          >/dev/null 2>&1
+    $FLEXIPWN run remove "$env_id" --yes  >/dev/null 2>&1 \
+      && echo "  eliminado ${env_id}" \
+      || warn "  no se pudo eliminar ${env_id}, revisalo a mano"
+  done < "${OUTDIR}/a-borrar.txt"
+
+  # Verificacion: ¿quedo algo vivo que no estuviera antes?
+  RESTOS="$(comm -13 "$ENV_IDS_INICIALES" <(managed_env_ids))"
+  if [ -n "$RESTOS" ]; then
+    warn "Quedaron entornos sin eliminar. Bajalos con 'flexipwn run remove <env_id> --yes':"
+    echo "$RESTOS" | sed 's/^/    /'
+  else
+    echo "  verificado: no quedaron entornos de esta corrida"
+  fi
 fi
 
 if [ "$DAEMON_YA_CORRIA" = "no" ]; then
